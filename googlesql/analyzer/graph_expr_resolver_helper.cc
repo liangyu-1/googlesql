@@ -59,14 +59,8 @@ absl::StatusOr<const GraphDynamicLabel*> GetDynamicLabelOfElementTable(
 absl::Status ValidateGraphElementTablesDynamicLabelAndProperties(
     const LanguageOptions& language_options, const ASTNode* error_location,
     const PropertyGraph& property_graph) {
-  absl::flat_hash_set<const GraphNodeTable*> node_tables;
-  GOOGLESQL_RETURN_IF_ERROR(property_graph.GetNodeTables(node_tables));
-  absl::flat_hash_set<const GraphEdgeTable*> edge_tables;
-  GOOGLESQL_RETURN_IF_ERROR(property_graph.GetEdgeTables(edge_tables));
-
-  absl::flat_hash_set<const GraphElementTable*> element_tables{
-      node_tables.begin(), node_tables.end()};
-  element_tables.insert(edge_tables.begin(), edge_tables.end());
+  std::vector<const GraphElementTable*> element_tables;
+  element_tables = googlesql::GetElementTablesInDeclarationOrder(property_graph);
   for (const GraphElementTable* element_table : element_tables) {
     // Both DDL and query language features must be enabled for dynamic labels
     // and properties to be supported.
@@ -115,22 +109,13 @@ absl::Status FindAllLabelsApplicableToElementKind(
     absl::flat_hash_set<const GraphElementLabel*>& static_labels,
     absl::flat_hash_map<const GraphElementTable*, const GraphDynamicLabel*>&
         dynamic_labels) {
-  absl::flat_hash_set<const GraphElementTable*> element_tables;
-  if (element_kind == GraphElementTable::Kind::kNode) {
-    absl::flat_hash_set<const GraphNodeTable*> node_tables;
-    GOOGLESQL_RETURN_IF_ERROR(property_graph.GetNodeTables(node_tables));
-    element_tables = absl::flat_hash_set<const GraphElementTable*>(
-        {node_tables.begin(), node_tables.end()});
-  } else {
-    absl::flat_hash_set<const GraphEdgeTable*> edge_tables;
-    GOOGLESQL_RETURN_IF_ERROR(property_graph.GetEdgeTables(edge_tables));
-    element_tables = absl::flat_hash_set<const GraphElementTable*>(
-        {edge_tables.begin(), edge_tables.end()});
-  }
+  std::vector<const GraphElementTable*> element_tables =
+      googlesql::GetElementTablesInDeclarationOrder(property_graph,
+                                                    element_kind);
 
   for (const GraphElementTable* element_table : element_tables) {
-    absl::flat_hash_set<const GraphElementLabel*> labels;
-    GOOGLESQL_RETURN_IF_ERROR(element_table->GetLabels(labels));
+    std::vector<const GraphElementLabel*> labels =
+        googlesql::GetLabelsInDeclarationOrder(*element_table);
     static_labels.insert(labels.begin(), labels.end());
 
     GOOGLESQL_ASSIGN_OR_RETURN(const GraphDynamicLabel* dynamic_label,
@@ -367,6 +352,27 @@ GetResolvedLiteralForPropertyName(absl::string_view property_name) {
       .Build();
 }
 
+absl::StatusOr<const GraphPropertyDeclaration*>
+FindExposedGraphPropertyDeclaration(
+    const ASTNode* error_location, const PropertyGraph* graph,
+    const GraphElementType* element_type, absl::string_view property_name,
+    bool allows_undeclared_dynamic_properties) {
+  if (element_type->FindPropertyType(property_name) == nullptr) {
+    if (allows_undeclared_dynamic_properties && element_type->is_dynamic()) {
+      return nullptr;
+    }
+    return MakeSqlErrorAt(error_location)
+           << "Property " << property_name
+           << " is not exposed by element type "
+           << element_type->DebugString();
+  }
+
+  const GraphPropertyDeclaration* prop_dcl;
+  GOOGLESQL_RETURN_IF_ERROR(graph->FindPropertyDeclarationByName(property_name, prop_dcl));
+  GOOGLESQL_RET_CHECK(prop_dcl != nullptr);
+  return prop_dcl;
+}
+
 absl::StatusOr<std::unique_ptr<const ResolvedGraphGetElementProperty>>
 ResolveGraphGetElementProperty(
     const ASTNode* error_location, const PropertyGraph* graph,
@@ -378,27 +384,19 @@ ResolveGraphGetElementProperty(
   std::unique_ptr<const ResolvedGraphGetElementProperty>
       get_element_property_expr;
 
-  if (element_type->FindPropertyType(property_name) == nullptr) {
-    if (element_type->is_dynamic()) {
-      GOOGLESQL_RET_CHECK(supports_dynamic_properties);
-      GOOGLESQL_ASSIGN_OR_RETURN(get_element_property_expr,
-                       std::move(builder)
-                           .set_type(types::JsonType())
-                           .set_property_name(
-                               GetResolvedLiteralForPropertyName(property_name))
-                           .Build());
-    } else {
-      return MakeSqlErrorAt(error_location)
-             << "Property " << property_name
-             << " is not exposed by element type "
-             << element_type->DebugString();
-    }
+  GOOGLESQL_ASSIGN_OR_RETURN(const GraphPropertyDeclaration* prop_dcl,
+                     FindExposedGraphPropertyDeclaration(
+                         error_location, graph, element_type, property_name,
+                         /*allows_undeclared_dynamic_properties=*/true));
+  if (prop_dcl == nullptr) {
+    GOOGLESQL_RET_CHECK(supports_dynamic_properties);
+    GOOGLESQL_ASSIGN_OR_RETURN(get_element_property_expr,
+                     std::move(builder)
+                         .set_type(types::JsonType())
+                         .set_property_name(
+                             GetResolvedLiteralForPropertyName(property_name))
+                         .Build());
   } else {
-    const GraphPropertyDeclaration* prop_dcl;
-    GOOGLESQL_RETURN_IF_ERROR(
-        graph->FindPropertyDeclarationByName(property_name, prop_dcl));
-    GOOGLESQL_RET_CHECK(prop_dcl != nullptr);
-
     if (supports_dynamic_properties) {
       builder.set_property_name(
           GetResolvedLiteralForPropertyName(property_name));

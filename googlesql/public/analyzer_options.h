@@ -36,6 +36,7 @@
 #include "googlesql/public/error_helpers.h"
 #include "googlesql/public/id_string.h"
 #include "googlesql/public/options.pb.h"
+#include "googlesql/public/property_graph.h"
 #include "googlesql/public/type.h"
 #include "googlesql/public/types/annotation.h"
 #include "googlesql/public/types/type_factory.h"
@@ -896,6 +897,13 @@ class AnalyzerOptions {
   // AnalyzerOptions was already so expensive that throwing one more heap
   // allocation into the mix was in the noise.)
   struct Data {
+    struct GraphPropertyMetadata {
+      const Type* type = nullptr;
+      GraphPropertyDeclaration::Kind kind =
+          GraphPropertyDeclaration::Kind::kInvalid;
+      std::string semantic_name;
+    };
+
     // These options determine the language that is accepted.
     LanguageOptions language_options;
 
@@ -910,8 +918,13 @@ class AnalyzerOptions {
     QueryParametersMap query_parameters;
     QueryParametersMap expression_columns;
 
-    // Maps of graph properties. The keys are lowercased.
+    // Maps of graph properties available for direct scalar expression
+    // resolution. The keys are lowercased.
     QueryParametersMap graph_properties;
+    // Maps of all graph semantic properties, including measures. The keys are
+    // lowercased.
+    absl::flat_hash_map<std::string, GraphPropertyMetadata>
+        graph_property_metadata;
 
     // Maps system variables to their types.
     SystemVariablesMap system_variables;

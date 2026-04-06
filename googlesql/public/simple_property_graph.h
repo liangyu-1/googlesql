@@ -78,30 +78,49 @@ class SimplePropertyGraph : public PropertyGraph {
   absl::Status GetNodeTables(
       absl::flat_hash_set<const GraphNodeTable*>& output) const override;
 
+  absl::Span<const GraphNodeTable* const> GetNodeTablesInDeclarationOrder()
+      const {
+    return node_tables_in_order_;
+  }
+
   absl::Status GetEdgeTables(
       absl::flat_hash_set<const GraphEdgeTable*>& output) const override;
 
+  absl::Span<const GraphEdgeTable* const> GetEdgeTablesInDeclarationOrder()
+      const {
+    return edge_tables_in_order_;
+  }
+
   absl::Status GetLabels(
       absl::flat_hash_set<const GraphElementLabel*>& output) const override;
+
+  absl::Span<const GraphElementLabel* const> GetLabelsInDeclarationOrder()
+      const;
 
   absl::Status GetPropertyDeclarations(
       absl::flat_hash_set<const GraphPropertyDeclaration*>& output)
       const override;
 
+  absl::Span<const GraphPropertyDeclaration* const>
+  GetPropertyDeclarationsInDeclarationOrder() const;
+
   // Add a node table.
   void AddNodeTable(std::unique_ptr<const GraphNodeTable> node_table) {
+    node_tables_in_order_.push_back(node_table.get());
     node_tables_map_.try_emplace(absl::AsciiStrToLower(node_table->Name()),
                                  std::move(node_table));
   }
 
   // Add an edge table.
   void AddEdgeTable(std::unique_ptr<const GraphEdgeTable> edge_table) {
+    edge_tables_in_order_.push_back(edge_table.get());
     edge_tables_map_.try_emplace(absl::AsciiStrToLower(edge_table->Name()),
                                  std::move(edge_table));
   }
 
   // Add a label.
   void AddLabel(std::unique_ptr<const GraphElementLabel> label) {
+    labels_in_order_.push_back(label.get());
     labels_map_.try_emplace(absl::AsciiStrToLower(label->Name()),
                             std::move(label));
   }
@@ -109,6 +128,7 @@ class SimplePropertyGraph : public PropertyGraph {
   // Add a label.
   void AddPropertyDeclaration(
       std::unique_ptr<const GraphPropertyDeclaration> property_declaration) {
+    property_dcls_in_order_.push_back(property_declaration.get());
     property_dcls_map_.try_emplace(
         absl::AsciiStrToLower(property_declaration->Name()),
         std::move(property_declaration));
@@ -126,12 +146,16 @@ class SimplePropertyGraph : public PropertyGraph {
   absl::flat_hash_map<std::string,
                       std::unique_ptr<const GraphPropertyDeclaration>>
       property_dcls_map_;
+  std::vector<const GraphPropertyDeclaration*> property_dcls_in_order_;
   absl::flat_hash_map<std::string, std::unique_ptr<const GraphElementLabel>>
       labels_map_;
+  std::vector<const GraphElementLabel*> labels_in_order_;
   absl::flat_hash_map<std::string, std::unique_ptr<const GraphNodeTable>>
       node_tables_map_;
+  std::vector<const GraphNodeTable*> node_tables_in_order_;
   absl::flat_hash_map<std::string, std::unique_ptr<const GraphEdgeTable>>
       edge_tables_map_;
+  std::vector<const GraphEdgeTable*> edge_tables_in_order_;
 };
 
 class SimpleGraphNodeTable : public GraphNodeTable {
@@ -140,7 +164,7 @@ class SimpleGraphNodeTable : public GraphNodeTable {
       absl::string_view name,
       absl::Span<const std::string> property_graph_name_path,
       const Table* input_table, const std::vector<int>& key_cols,
-      const absl::flat_hash_set<const GraphElementLabel*>& labels,
+      absl::Span<const GraphElementLabel* const> labels,
       std::vector<std::unique_ptr<const GraphPropertyDefinition>>
           property_definitions,
       std::unique_ptr<const GraphDynamicLabel> dynamic_label = nullptr,
@@ -168,11 +192,17 @@ class SimpleGraphNodeTable : public GraphNodeTable {
       absl::flat_hash_set<const GraphPropertyDefinition*>& output)
       const override;
 
+  absl::Span<const GraphPropertyDefinition* const>
+  GetPropertyDefinitionsInDeclarationOrder() const;
+
   absl::Status FindLabelByName(absl::string_view name,
                                const GraphElementLabel*& label) const override;
 
   absl::Status GetLabels(
       absl::flat_hash_set<const GraphElementLabel*>& output) const override;
+
+  absl::Span<const GraphElementLabel* const> GetLabelsInDeclarationOrder()
+      const;
 
   bool HasDynamicLabel() const override;
   absl::Status GetDynamicLabel(
@@ -206,11 +236,12 @@ class SimpleGraphEdgeTable : public GraphEdgeTable {
       absl::string_view name,
       absl::Span<const std::string> property_graph_name_path,
       const Table* input_table, const std::vector<int>& key_cols,
-      const absl::flat_hash_set<const GraphElementLabel*>& labels,
+      absl::Span<const GraphElementLabel* const> labels,
       std::vector<std::unique_ptr<const GraphPropertyDefinition>>
           property_definitions,
       std::unique_ptr<const GraphNodeTableReference> source_node,
       std::unique_ptr<const GraphNodeTableReference> destination_node,
+      PropertyGraphRelationMetadata relation_metadata = {},
       std::unique_ptr<const GraphDynamicLabel> dynamic_label = nullptr,
       std::unique_ptr<const GraphDynamicProperties> dynamic_properties = nullptr
   );
@@ -236,15 +267,25 @@ class SimpleGraphEdgeTable : public GraphEdgeTable {
       absl::flat_hash_set<const GraphPropertyDefinition*>& output)
       const override;
 
+  absl::Span<const GraphPropertyDefinition* const>
+  GetPropertyDefinitionsInDeclarationOrder() const;
+
   absl::Status FindLabelByName(absl::string_view name,
                                const GraphElementLabel*& label) const override;
 
   absl::Status GetLabels(
       absl::flat_hash_set<const GraphElementLabel*>& output) const override;
 
+  absl::Span<const GraphElementLabel* const> GetLabelsInDeclarationOrder()
+      const;
+
   const GraphNodeTableReference* GetSourceNodeTable() const override;
 
   const GraphNodeTableReference* GetDestNodeTable() const override;
+
+  const PropertyGraphRelationMetadata* GetRelationMetadata() const override {
+    return &relation_metadata_;
+  }
 
   absl::Status Serialize(FileDescriptorSetMap* file_descriptor_set_map,
                          SimpleGraphElementTableProto* proto) const;
@@ -258,6 +299,10 @@ class SimpleGraphEdgeTable : public GraphEdgeTable {
   bool HasDynamicProperties() const override;
   absl::Status GetDynamicProperties(
       const GraphDynamicProperties*& dynamic_properties) const override;
+
+  const PropertyGraphRelationMetadata& relation_metadata() const {
+    return relation_metadata_;
+  }
   static absl::StatusOr<std::unique_ptr<SimpleGraphEdgeTable>> Deserialize(
       const SimpleGraphElementTableProto& proto, SimpleCatalog* catalog,
       const TypeDeserializer& type_deserializer,
@@ -273,6 +318,7 @@ class SimpleGraphEdgeTable : public GraphEdgeTable {
   const std::unique_ptr<const ElementTableCommonInternal> element_internal_;
   const std::unique_ptr<const GraphNodeTableReference> source_node_;
   const std::unique_ptr<const GraphNodeTableReference> destination_node_;
+  const PropertyGraphRelationMetadata relation_metadata_;
 };
 
 class SimpleGraphElementLabel : public GraphElementLabel {
@@ -280,12 +326,12 @@ class SimpleGraphElementLabel : public GraphElementLabel {
   SimpleGraphElementLabel(
       absl::string_view name,
       absl::Span<const std::string> property_graph_name_path,
-      const absl::flat_hash_set<const GraphPropertyDeclaration*>&
-          property_declarations)
+      absl::Span<const GraphPropertyDeclaration* const> property_declarations)
       : name_(name),
         property_graph_name_path_(property_graph_name_path.begin(),
                                   property_graph_name_path.end()),
-        property_declarations_(property_declarations) {}
+        property_declarations_(property_declarations.begin(),
+                               property_declarations.end()) {}
 
   std::string Name() const override;
   absl::Span<const std::string> PropertyGraphNamePath() const override;
@@ -300,6 +346,11 @@ class SimpleGraphElementLabel : public GraphElementLabel {
     return absl::OkStatus();
   }
 
+  absl::Span<const GraphPropertyDeclaration* const>
+  GetPropertyDeclarationsInDeclarationOrder() const {
+    return property_declarations_;
+  }
+
   absl::Status Serialize(SimpleGraphElementLabelProto* proto) const;
 
   static absl::StatusOr<std::unique_ptr<SimpleGraphElementLabel>> Deserialize(
@@ -311,8 +362,7 @@ class SimpleGraphElementLabel : public GraphElementLabel {
  private:
   const std::string name_;
   const std::vector<std::string> property_graph_name_path_;
-  const absl::flat_hash_set<const GraphPropertyDeclaration*>
-      property_declarations_;
+  const std::vector<const GraphPropertyDeclaration*> property_declarations_;
 };
 
 class SimpleGraphNodeTableReference : public GraphNodeTableReference {
@@ -401,25 +451,33 @@ class SimpleGraphPropertyDefinition : public GraphPropertyDefinition {
  public:
   SimpleGraphPropertyDefinition(
       const GraphPropertyDeclaration* property_declaration,
-      absl::string_view expr_sql)
+      absl::string_view expr_sql,
+      GraphPropertySemanticMetadata semantic_metadata = {})
       : property_declaration_(property_declaration),
-        expression_sql_(expr_sql) {}
+        expression_sql_(expr_sql),
+        semantic_metadata_(std::move(semantic_metadata)),
+        resolved_expr_(nullptr) {}
 
   const GraphPropertyDeclaration& GetDeclaration() const override {
     return *property_declaration_;
   }
 
   absl::StatusOr<const ResolvedExpr*> GetValueExpression() const override {
-    if (resolved_expr_ == nullptr) {
+    if (owned_resolved_expr_ == nullptr && resolved_expr_ == nullptr) {
       return googlesql_base::UnimplementedErrorBuilder()
              << "SimpleCatalog does not resolve the property definitions.";
     }
 
-    return resolved_expr_;
+    return owned_resolved_expr_ != nullptr ? owned_resolved_expr_.get()
+                                           : resolved_expr_;
   }
 
   // The returned string_view is only valid as long as this object is alive.
   absl::string_view expression_sql() const override { return expression_sql_; }
+
+  const GraphPropertySemanticMetadata& SemanticMetadata() const override {
+    return semantic_metadata_;
+  }
 
   absl::Status Serialize(FileDescriptorSetMap* file_descriptor_set_map,
                          SimpleGraphPropertyDefinitionProto* proto) const;
@@ -435,29 +493,32 @@ class SimpleGraphPropertyDefinition : public GraphPropertyDefinition {
   // The property declaration implemented here. Owned by the same catalog.
   const GraphPropertyDeclaration* property_declaration_;
   const std::string expression_sql_;
+  const GraphPropertySemanticMetadata semantic_metadata_;
 
   // This is just a little hack used in compliance testing to avoid duplicating
   // the deserialization code.
   // TODO: remove this field once we are able to store unique_ptrs on
   // the AnalyzerOutput.
   const ResolvedExpr* resolved_expr_;
+  std::unique_ptr<const ResolvedExpr> owned_resolved_expr_;
   friend class InternalPropertyGraph;
 };
 class SimpleGraphDynamicLabel : public GraphDynamicLabel {
  public:
   explicit SimpleGraphDynamicLabel(absl::string_view label_expression)
-      : label_expression_(label_expression) {};
+      : label_expression_(label_expression), resolved_expr_(nullptr) {};
 
   absl::string_view label_expression() const override {
     return label_expression_;
   }
 
   absl::StatusOr<const ResolvedExpr*> GetValueExpression() const override {
-    if (resolved_expr_ == nullptr) {
+    if (owned_resolved_expr_ == nullptr && resolved_expr_ == nullptr) {
       return googlesql_base::UnimplementedErrorBuilder()
              << "SimpleCatalog does not resolve the dynamic label.";
     }
-    return resolved_expr_;
+    return owned_resolved_expr_ != nullptr ? owned_resolved_expr_.get()
+                                           : resolved_expr_;
   };
 
   template <class GraphDynamicLabelSubclass>
@@ -469,32 +530,36 @@ class SimpleGraphDynamicLabel : public GraphDynamicLabel {
     return static_cast<const GraphDynamicLabelSubclass*>(this);
   }
 
-  absl::Status Serialize(SimpleGraphElementDynamicLabelProto* proto) const;
+  absl::Status Serialize(FileDescriptorSetMap* file_descriptor_set_map,
+                         SimpleGraphElementDynamicLabelProto* proto) const;
 
   static absl::StatusOr<std::unique_ptr<SimpleGraphDynamicLabel>> Deserialize(
-      const SimpleGraphElementDynamicLabelProto& proto);
+      const SimpleGraphElementDynamicLabelProto& proto,
+      const ResolvedNode::RestoreParams& params);
 
  private:
   const std::string label_expression_;
   const ResolvedExpr* resolved_expr_;
+  std::unique_ptr<const ResolvedExpr> owned_resolved_expr_;
   friend class InternalPropertyGraph;
 };
 
 class SimpleGraphDynamicProperties : public GraphDynamicProperties {
  public:
   explicit SimpleGraphDynamicProperties(absl::string_view properties_expression)
-      : properties_expression_(properties_expression) {}
+      : properties_expression_(properties_expression), resolved_expr_(nullptr) {}
 
   absl::string_view properties_expression() const override {
     return properties_expression_;
   }
 
   absl::StatusOr<const ResolvedExpr*> GetValueExpression() const override {
-    if (resolved_expr_ == nullptr) {
+    if (owned_resolved_expr_ == nullptr && resolved_expr_ == nullptr) {
       return googlesql_base::UnimplementedErrorBuilder()
              << "SimpleCatalog does not resolve the dynamic properties.";
     }
-    return resolved_expr_;
+    return owned_resolved_expr_ != nullptr ? owned_resolved_expr_.get()
+                                           : resolved_expr_;
   };
 
   template <class GraphDynamicPropertiesSubclass>
@@ -506,14 +571,17 @@ class SimpleGraphDynamicProperties : public GraphDynamicProperties {
     return static_cast<const GraphDynamicPropertiesSubclass*>(this);
   }
 
-  absl::Status Serialize(SimpleGraphElementDynamicPropertiesProto* proto) const;
+  absl::Status Serialize(FileDescriptorSetMap* file_descriptor_set_map,
+                         SimpleGraphElementDynamicPropertiesProto* proto) const;
 
   static absl::StatusOr<std::unique_ptr<SimpleGraphDynamicProperties>>
-  Deserialize(const SimpleGraphElementDynamicPropertiesProto& proto);
+  Deserialize(const SimpleGraphElementDynamicPropertiesProto& proto,
+              const ResolvedNode::RestoreParams& params);
 
  private:
   const std::string properties_expression_;
   const ResolvedExpr* resolved_expr_;
+  std::unique_ptr<const ResolvedExpr> owned_resolved_expr_;
   friend class InternalPropertyGraph;
 };
 }  // namespace googlesql

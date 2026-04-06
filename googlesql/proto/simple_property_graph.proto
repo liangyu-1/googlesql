@@ -20,6 +20,7 @@ package googlesql;
 
 import "googlesql/public/annotation.proto";
 import "googlesql/public/type.proto";
+import "googlesql/resolved_ast/serialization.proto";
 
 option java_package = "com.google.googlesql";
 option java_outer_classname = "SimplePropertyGraphProtos";
@@ -52,6 +53,14 @@ message SimpleGraphElementTableProto {
   optional SimpleGraphNodeTableReferenceProto dest_node_table = 9;
   optional SimpleGraphElementDynamicPropertiesProto dynamic_properties = 10;
   optional SimpleGraphElementDynamicLabelProto dynamic_label = 11;
+  optional string relation_source_name = 12;
+  optional string relation_destination_name = 13;
+  optional string relation_outgoing_name = 14;
+  optional string relation_incoming_name = 15;
+  optional bool relation_source_is_multi = 16;
+  optional bool relation_destination_is_multi = 17;
+  optional bool relation_outgoing_is_multi = 18;
+  optional bool relation_incoming_is_multi = 19;
 }
 
 message SimpleGraphElementLabelProto {
@@ -82,12 +91,20 @@ message SimpleGraphPropertyDeclarationProto {
 message SimpleGraphPropertyDefinitionProto {
   optional string property_declaration_name = 1;
   optional string value_expression_sql = 2;
+  optional AnyResolvedNodeProto value_expression = 3;
+  optional string description = 4;
+  optional string display_name = 5;
+  optional string semantic_role = 6;
+  repeated string semantic_aliases = 7;
+  optional bool hidden = 8;
 }
 
 message SimpleGraphElementDynamicPropertiesProto {
   optional string properties_expression = 1;
+  optional AnyResolvedNodeProto value_expression = 2;
 }
 
 message SimpleGraphElementDynamicLabelProto {
   optional string label_expression = 1;
+  optional AnyResolvedNodeProto value_expression = 2;
 }

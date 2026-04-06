@@ -100,44 +100,14 @@ class UnsupportedQueryShapeFinder : public ResolvedASTVisitor {
   // `invoked_measure_columns_`.
   absl::Status VisitResolvedSubqueryExpr(
       const ResolvedSubqueryExpr* node) override {
-    if (node->subquery_type() == ResolvedSubqueryExpr::SCALAR) {
-      GOOGLESQL_RET_CHECK(node->subquery()->column_list_size() == 1);
-      if (node->subquery()->column_list(0).type()->IsMeasureType()) {
-        return absl::UnimplementedError(
-            "Measure type rewriter does not support scalar subqueries that "
-            "emit measure columns");
-      }
-    }
     return DefaultVisit(node);
   }
 
-  // TODO: b/350555383  - Support this shape in the future
   absl::Status VisitResolvedWithScan(const ResolvedWithScan* node) override {
-    for (const std::unique_ptr<const ResolvedWithEntry>& with_entry :
-         node->with_entry_list()) {
-      absl::flat_hash_set<ResolvedColumn> projected_cols;
-      if (absl::c_any_of(with_entry->with_subquery()->column_list(),
-                         [&projected_cols](const ResolvedColumn& column) {
-                           return !projected_cols.insert(column).second;
-                         })) {
-        return absl::UnimplementedError(
-            "Measure type rewriter does not support WITH scans emitting "
-            "duplicate measure columns");
-      }
-    }
     return DefaultVisit(node);
   }
 
-  // TODO: b/350555383  - Support this shape in the future
   absl::Status VisitResolvedJoinScan(const ResolvedJoinScan* node) override {
-    if (node->is_lateral() &&
-        absl::c_any_of(node->column_list(), [](const ResolvedColumn& column) {
-          return IsOrContainsMeasure(column.type());
-        })) {
-      return absl::UnimplementedError(
-          "Measure type rewriter does not support LATERAL joins that emit "
-          "measure columns");
-    }
     return DefaultVisit(node);
   }
 
@@ -162,26 +132,12 @@ class UnsupportedQueryShapeFinder : public ResolvedASTVisitor {
     return DefaultVisit(node);
   }
 
-  // TODO: b/350555383  - Support this shape in the future
   absl::Status VisitResolvedWithExpr(const ResolvedWithExpr* node) override {
-    if (IsOrContainsMeasure(node->expr()->type())) {
-      return absl::UnimplementedError(
-          "Measure type rewriter does not support WITH expressions emitting a "
-          "measure type");
-    }
     return DefaultVisit(node);
   }
 
-  // TODO: b/350555383  - Support this shape in the future
   absl::Status VisitResolvedMeasureGroup(
       const ResolvedMeasureGroup* node) override {
-    for (const auto& computed_column : node->aggregate_list()) {
-      if (IsMeasureAggFunction(computed_column->expr())) {
-        return absl::UnimplementedError(
-            "Measure type rewriter does not support aggregating measures in a "
-            "MATCH_RECOGNIZE scan");
-      }
-    }
     return DefaultVisit(node);
   }
 

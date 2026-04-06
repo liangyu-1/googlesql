@@ -248,6 +248,61 @@ absl::Status ValidateColumnsAreUnique(const ASTColumnList* input_ast) {
   return absl::OkStatus();
 }
 
+struct RelationDeclarationOptions {
+  std::optional<std::string> source_name;
+  std::optional<std::string> destination_name;
+  std::optional<std::string> outgoing_name;
+  std::optional<std::string> incoming_name;
+  std::optional<bool> source_is_multi;
+  std::optional<bool> destination_is_multi;
+  std::optional<bool> outgoing_is_multi;
+  std::optional<bool> incoming_is_multi;
+};
+
+absl::StatusOr<RelationDeclarationOptions> ResolveRelationDeclarationOptions(
+    Resolver& resolver, const ASTOptionsList* options_list) {
+  RelationDeclarationOptions options;
+  if (options_list == nullptr) {
+    return options;
+  }
+  std::vector<std::unique_ptr<const ResolvedOption>> resolved_options;
+  GOOGLESQL_RETURN_IF_ERROR(resolver.ResolveOptionsList(
+      options_list, /*allow_alter_array_operators=*/false, &resolved_options));
+  for (const std::unique_ptr<const ResolvedOption>& option : resolved_options) {
+    if (option->value() == nullptr || !option->value()->Is<ResolvedLiteral>()) {
+      continue;
+    }
+    const Value& value = option->value()->GetAs<ResolvedLiteral>()->value();
+    if (googlesql_base::CaseEqual(option->name(), "source_name") &&
+        value.type()->IsString()) {
+      options.source_name = value.string_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "destination_name") &&
+               value.type()->IsString()) {
+      options.destination_name = value.string_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "outgoing_name") &&
+               value.type()->IsString()) {
+      options.outgoing_name = value.string_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "incoming_name") &&
+               value.type()->IsString()) {
+      options.incoming_name = value.string_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "source_is_multi") &&
+               value.type()->IsBool()) {
+      options.source_is_multi = value.bool_value();
+    } else if (googlesql_base::CaseEqual(option->name(),
+                                         "destination_is_multi") &&
+               value.type()->IsBool()) {
+      options.destination_is_multi = value.bool_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "outgoing_is_multi") &&
+               value.type()->IsBool()) {
+      options.outgoing_is_multi = value.bool_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "incoming_is_multi") &&
+               value.type()->IsBool()) {
+      options.incoming_is_multi = value.bool_value();
+    }
+  }
+  return options;
+}
+
 // Validates no duplicate label within element table.
 absl::Status ValidateNoDuplicateLabelForElementTable(
     const ASTNode* ast_location, absl::string_view element_table_name,
@@ -781,11 +836,18 @@ GraphStmtResolver::ResolveGraphPropertyList(
   GOOGLESQL_RETURN_IF_ERROR(ValidateGraphPropertyList(properties));
 
   static constexpr char kPropertiesClause[] = "PROPERTIES clause";
-  auto expr_resolution_info =
-      std::make_unique<ExprResolutionInfo>(input_scope, kPropertiesClause);
+  auto expr_resolution_info = std::make_unique<ExprResolutionInfo>(
+      input_scope, ExprResolutionInfoOptions{
+                       .clause_name = kPropertiesClause,
+                       .allows_graph_property_reference = true,
+                   });
   std::vector<std::unique_ptr<const ResolvedGraphPropertyDefinition>>
       property_defs;
   property_defs.reserve(properties.size());
+
+  absl::Cleanup cleanup = [this] {
+    InternalAnalyzerOptions::ClearGraphProperty(resolver_.analyzer_options());
+  };
 
   // First pass, process non-measure properties.
   bool has_measure_properties = false;
@@ -798,6 +860,12 @@ GraphStmtResolver::ResolveGraphPropertyList(
     GOOGLESQL_ASSIGN_OR_RETURN(
         auto property_def,
         ResolveGraphProperty(property, expr_resolution_info.get()));
+    GOOGLESQL_RETURN_IF_ERROR(InternalAnalyzerOptions::AddGraphProperty(
+                        resolver_.analyzer_options(),
+                        property_def->property_declaration_name(),
+                        property_def->expr()->type(),
+                        GraphPropertyDeclaration::Kind::kScalar))
+        .With(LocationOverride(property));
     property_defs.push_back(GetResolvedElementWithLocation(
         std::move(property_def), property->location()));
   }
@@ -807,20 +875,6 @@ GraphStmtResolver::ResolveGraphPropertyList(
   }
 
   // Second pass, process measure properties.
-  // Add non-measure properties as expression columns.
-  absl::Cleanup cleanup = [this] {
-    // We need to remove the added graph properties in cleanup.
-    InternalAnalyzerOptions::ClearGraphProperty(resolver_.analyzer_options());
-  };
-
-  for (const auto& property_def : property_defs) {
-    GOOGLESQL_RETURN_IF_ERROR(InternalAnalyzerOptions::AddGraphProperty(
-                        resolver_.analyzer_options(),
-                        property_def->property_declaration_name(),
-                        property_def->expr()->type()))
-        .With(LocationOverride(ast_location));
-  }
-
   auto query_resolution_info =
       std::make_unique<QueryResolutionInfo>(&resolver_);
   auto measure_expr_resolution_info = std::make_unique<ExprResolutionInfo>(
@@ -830,6 +884,7 @@ GraphStmtResolver::ResolveGraphPropertyList(
           .allows_analytic = false,
           .clause_name = kPropertiesClause,
           .is_graph_measure_expression = true,
+          .allows_graph_property_reference = true,
       });
   for (const auto& property : properties) {
     if (!IsMeasureProperty(property)) {
@@ -846,6 +901,12 @@ GraphStmtResolver::ResolveGraphPropertyList(
                                   resolver_.language(),
                                   property_def->property_declaration_name()))
         .With(LocationOverride(property->expression()));
+    GOOGLESQL_RETURN_IF_ERROR(InternalAnalyzerOptions::AddGraphPropertyMetadata(
+                        resolver_.analyzer_options(),
+                        property_def->property_declaration_name(),
+                        property_def->expr()->type(),
+                        GraphPropertyDeclaration::Kind::kMeasure))
+        .With(LocationOverride(property));
 
     property_defs.push_back(GetResolvedElementWithLocation(
         std::move(property_def), property->location()));
@@ -1088,6 +1149,7 @@ GraphStmtResolver::ResolveLabelAndProperties(
             .set_type(property_def->expr()->type())
             .set_type_annotation_map(
                 property_def->expr()->type_annotation_map())
+            .set_is_measure(property_def->is_measure())
             .Build());
     property_declaration_names.push_back(property_decl->name());
   }
@@ -1290,6 +1352,7 @@ GraphStmtResolver::ResolveGraphElementTable(
             .set_type(property_def->expr()->type())
             .set_type_annotation_map(
                 property_def->expr()->type_annotation_map())
+            .set_is_measure(property_def->is_measure())
             .Build());
     GOOGLESQL_RET_CHECK_NE(property_def->GetParseLocationRangeOrNULL(), nullptr);
     property_decls.push_back(GetResolvedElementWithLocation(
@@ -1346,6 +1409,8 @@ absl::Status GraphStmtResolver::ResolveCreatePropertyGraphStmt(
   std::vector<std::unique_ptr<const ResolvedGraphElementLabel>> labels;
   std::vector<std::unique_ptr<const ResolvedGraphPropertyDeclaration>>
       property_decls;
+  std::vector<std::unique_ptr<const ResolvedGraphRelationshipDeclaration>>
+      relation_decls;
 
   // Check the feature flag once and store its state.
   const bool dynamic_label_properties_feature_enabled =
@@ -1430,11 +1495,52 @@ absl::Status GraphStmtResolver::ResolveCreatePropertyGraphStmt(
               element_table_with_labels_and_properties,
           ResolveGraphElementTable(
               ast_edge_table, GraphElementTable::Kind::kEdge, node_table_map));
+      GOOGLESQL_ASSIGN_OR_RETURN(
+          RelationDeclarationOptions relation_options,
+          ResolveRelationDeclarationOptions(
+              resolver_, ast_edge_table->default_label_options_list()));
       GOOGLESQL_RETURN_IF_ERROR(ValidateLabelWithOptionsNotBoundInMultipleElementTables(
           element_table_with_labels_and_properties.labels,
           labels_with_options));
       edge_tables.push_back(
           std::move(element_table_with_labels_and_properties.element_table));
+      const ResolvedGraphElementTable* resolved_edge_table =
+          edge_tables.back().get();
+      GOOGLESQL_RET_CHECK(resolved_edge_table->source_node_reference() != nullptr);
+      GOOGLESQL_RET_CHECK(resolved_edge_table->dest_node_reference() != nullptr);
+      GOOGLESQL_ASSIGN_OR_RETURN(
+          std::unique_ptr<const ResolvedGraphRelationshipDeclaration>
+              relation_decl,
+          ResolvedGraphRelationshipDeclarationBuilder()
+              .set_edge_table_alias(resolved_edge_table->alias())
+              .set_source_node_identifier(
+                  resolved_edge_table->source_node_reference()
+                      ->node_table_identifier())
+              .set_destination_node_identifier(
+                  resolved_edge_table->dest_node_reference()
+                      ->node_table_identifier())
+              .set_source_name(relation_options.source_name.value_or(
+                  resolved_edge_table->source_node_reference()
+                      ->node_table_identifier()))
+              .set_destination_name(relation_options.destination_name.value_or(
+                  resolved_edge_table->dest_node_reference()
+                      ->node_table_identifier()))
+              .set_outgoing_name(
+                  relation_options.outgoing_name.value_or(
+                      resolved_edge_table->alias()))
+              .set_incoming_name(
+                  relation_options.incoming_name.value_or(
+                      resolved_edge_table->alias()))
+              .set_source_is_multi(
+                  relation_options.source_is_multi.value_or(false))
+              .set_destination_is_multi(
+                  relation_options.destination_is_multi.value_or(false))
+              .set_outgoing_is_multi(
+                  relation_options.outgoing_is_multi.value_or(true))
+              .set_incoming_is_multi(
+                  relation_options.incoming_is_multi.value_or(true))
+              .Build());
+      relation_decls.push_back(std::move(relation_decl));
       labels.insert(
           labels.end(),
           std::make_move_iterator(
@@ -1511,6 +1617,7 @@ absl::Status GraphStmtResolver::ResolveCreatePropertyGraphStmt(
                        .set_edge_table_list(std::move(edge_tables))
                        .set_label_list(std::move(labels))
                        .set_property_declaration_list(std::move(property_decls))
+                       .set_relation_declaration_list(std::move(relation_decls))
                        .set_option_list(std::move(option_list))
                        .Build());
 

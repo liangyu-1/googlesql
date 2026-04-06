@@ -300,6 +300,8 @@ ExprResolutionInfo::ExprResolutionInfo(
       allows_aggregation(options.allows_aggregation.value_or(false)),
       allows_analytic(options.allows_analytic.value_or(false)),
       is_graph_measure_expression(options.is_graph_measure_expression),
+      allows_graph_property_reference(
+          options.allows_graph_property_reference),
       clause_name(options.clause_name == nullptr ? "" : options.clause_name),
       query_resolution_info(query_resolution_info_in),
       use_post_grouping_columns(
@@ -355,6 +357,7 @@ ExprResolutionInfo::ExprResolutionInfo(ExprResolutionInfo* parent,
       ARG_UPDATE_OPT(allows_aggregation),
       ARG_UPDATE_OPT(allows_analytic),
       ARG_UPDATE(is_graph_measure_expression),
+      ARG_UPDATE(allows_graph_property_reference),
       ARG_UPDATE(clause_name),
       query_resolution_info(parent->query_resolution_info),
       ARG_UPDATE_OPT(use_post_grouping_columns),
@@ -392,6 +395,7 @@ ExprResolutionInfo::ExprResolutionInfo(
       ARG_UPDATE_OPT(allows_aggregation),
       ARG_UPDATE_OPT(allows_analytic),
       ARG_UPDATE(is_graph_measure_expression),
+      ARG_UPDATE(allows_graph_property_reference),
       ARG_UPDATE(clause_name),
       query_resolution_info(new_query_resolution_info),
       ARG_UPDATE_OPT(use_post_grouping_columns),
@@ -445,6 +449,8 @@ ExprResolutionInfo::ExprResolutionInfo(ExprResolutionInfo* parent)
       allows_aggregation(parent->allows_aggregation),
       allows_analytic(parent->allows_analytic),
       is_graph_measure_expression(parent->is_graph_measure_expression),
+      allows_graph_property_reference(
+          parent->allows_graph_property_reference),
       clause_name(parent->clause_name),
       query_resolution_info(parent->query_resolution_info),
       use_post_grouping_columns(parent->use_post_grouping_columns),

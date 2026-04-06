@@ -942,7 +942,7 @@ template <typename T>
 absl::StatusOr<ElementTableSet> GetTablesSatisfyingLabelExpr(
     const PropertyGraph& property_graph,
     const ResolvedGraphLabelExpr* label_expr,
-    const absl::flat_hash_set<const T*>& tables) {
+    absl::Span<const T* const> tables) {
   static_assert(
       std::is_base_of<GraphElementTable, T>::value,
       "Type parameter must have base class of type GraphElementTable");
@@ -952,7 +952,10 @@ absl::StatusOr<ElementTableSet> GetTablesSatisfyingLabelExpr(
                      GetDynamicLabelOfElementTable(*table));
 
     absl::flat_hash_set<const GraphElementLabel*> label_set;
-    GOOGLESQL_RETURN_IF_ERROR(table->GetLabels(label_set));
+    for (const GraphElementLabel* label :
+         googlesql::GetLabelsInDeclarationOrder(*table)) {
+      label_set.insert(label);
+    }
     GOOGLESQL_ASSIGN_OR_RETURN(auto label_expr_satisfied,
                      ElementLabelsSatisfyResolvedGraphLabelExpr(
                          label_set, dynamic_label, label_expr));
@@ -968,35 +971,34 @@ absl::StatusOr<ElementTableSet> GetMatchingElementTables(
     const ResolvedGraphLabelExpr* label_expr,
     const GraphElementTable::Kind element_kind) {
   GOOGLESQL_RET_CHECK_NE(label_expr, nullptr);
+  const PropertyGraphMatchSemanticModel semantic_model =
+      GetPropertyGraphMatchSemanticModel(property_graph);
 
   // For each element table in the graph, determine whether its set of exposed
   // labels satisfies the given label expression.
   switch (element_kind) {
     case GraphElementTable::Kind::kNode: {
-      absl::flat_hash_set<const GraphNodeTable*> node_tables;
-      GOOGLESQL_RETURN_IF_ERROR(property_graph.GetNodeTables(node_tables));
       return GetTablesSatisfyingLabelExpr(property_graph, label_expr,
-                                          node_tables);
+                                          semantic_model.node_tables);
     }
     case GraphElementTable::Kind::kEdge: {
-      absl::flat_hash_set<const GraphEdgeTable*> edge_tables;
-      GOOGLESQL_RETURN_IF_ERROR(property_graph.GetEdgeTables(edge_tables));
       return GetTablesSatisfyingLabelExpr(property_graph, label_expr,
-                                          edge_tables);
+                                          semantic_model.edge_tables);
     }
   }
 }
 
-absl::Status GetPropertySet(const ElementTableSet& element_tables,
+absl::Status GetPropertySet(const PropertyGraph& property_graph,
+                            const ElementTableSet& element_tables,
                             PropertySet& static_properties,
                             DynamicPropertyMap& dynamic_properties) {
   static_properties.clear();
   dynamic_properties.clear();
+  absl::flat_hash_set<const GraphPropertyDeclaration*> exposed_properties;
   for (const auto* element_table : element_tables) {
-    absl::flat_hash_set<const GraphPropertyDefinition*> properties;
-    GOOGLESQL_RETURN_IF_ERROR(element_table->GetPropertyDefinitions(properties));
-    for (const auto* prop : properties) {
-      static_properties.insert(&prop->GetDeclaration());
+    for (const GraphPropertyDeclaration* property_declaration :
+         googlesql::GetPropertyDeclarationsInDeclarationOrder(*element_table)) {
+      exposed_properties.insert(property_declaration);
     }
     if (element_table->HasDynamicProperties()) {
       const GraphDynamicProperties* dynamic = nullptr;
@@ -1005,6 +1007,37 @@ absl::Status GetPropertySet(const ElementTableSet& element_tables,
     }
   }
 
+  static_properties.reserve(exposed_properties.size());
+  const PropertyGraphMatchSemanticModel semantic_model =
+      GetPropertyGraphMatchSemanticModel(property_graph);
+  for (const GraphPropertyDeclaration* property_declaration :
+       semantic_model.property_declarations) {
+    if (exposed_properties.erase(property_declaration) > 0) {
+      static_properties.push_back(property_declaration);
+    }
+  }
+  if (!exposed_properties.empty()) {
+    std::vector<const GraphPropertyDeclaration*> remaining_properties(
+        exposed_properties.begin(), exposed_properties.end());
+    absl::c_sort(remaining_properties,
+                 [](const GraphPropertyDeclaration* lhs,
+                    const GraphPropertyDeclaration* rhs) {
+                   return lhs->Name() < rhs->Name();
+                 });
+    static_properties.insert(static_properties.end(), remaining_properties.begin(),
+                             remaining_properties.end());
+  }
+
+  return absl::OkStatus();
+}
+
+absl::Status GetNavigationBindingSet(const PropertyGraph& property_graph,
+                                     const ElementTableSet& element_tables,
+                                     NavigationBindingSet& navigation_bindings) {
+  std::vector<const GraphElementTable*> ordered_element_tables(
+      element_tables.begin(), element_tables.end());
+  navigation_bindings = GetPropertyGraphNavigationBindingsForElementTables(
+      property_graph, ordered_element_tables);
   return absl::OkStatus();
 }
 
@@ -1268,12 +1301,34 @@ GraphTableQueryResolver::ResolveElementPattern(
       GetMatchingElementTables(*graph_, label_expr.get(), table_kind));
   PropertySet static_properties;
   DynamicPropertyMap dynamic_properties;
-  GOOGLESQL_RETURN_IF_ERROR(GetPropertySet(matching_element_tables, static_properties,
-                                 dynamic_properties));
+  GOOGLESQL_RETURN_IF_ERROR(GetPropertySet(*graph_, matching_element_tables,
+                                 static_properties, dynamic_properties));
+  NavigationBindingSet navigation_bindings;
+  GOOGLESQL_RETURN_IF_ERROR(GetNavigationBindingSet(
+      *graph_, matching_element_tables, navigation_bindings));
   GOOGLESQL_ASSIGN_OR_RETURN(const Type* graph_element_type,
                    MakeGraphElementType(
                        table_kind, static_properties, resolver_->type_factory_,
                        /*is_dynamic=*/!dynamic_properties.empty()));
+  if (table_kind == GraphElementTable::Kind::kNode) {
+    for (const PropertyGraphNavigationBinding& binding : navigation_bindings) {
+      GOOGLESQL_RET_CHECK(binding.navigation_kind ==
+                              PropertyGraphNavigationKind::kOutgoing ||
+                          binding.navigation_kind ==
+                              PropertyGraphNavigationKind::kIncoming)
+          << "Unexpected node navigation binding kind for "
+          << binding.navigation_name;
+    }
+  } else {
+    for (const PropertyGraphNavigationBinding& binding : navigation_bindings) {
+      GOOGLESQL_RET_CHECK(binding.navigation_kind ==
+                              PropertyGraphNavigationKind::kSource ||
+                          binding.navigation_kind ==
+                              PropertyGraphNavigationKind::kDestination)
+          << "Unexpected edge navigation binding kind for "
+          << binding.navigation_name;
+    }
+  }
 
   ResolvedColumn element_column(resolver_->AllocateColumnId(),
                                 /*table_name=*/kElementTableName, element_alias,
@@ -2671,27 +2726,20 @@ absl::Status GraphTableQueryResolver::AddPropertiesFromElement(
 
     GOOGLESQL_RETURN_IF_ERROR(name_list->AddColumn(column_name_id, output_column,
                                          /*is_explicit=*/false));
-    const GraphPropertyDeclaration* prop_dcl;
-    GOOGLESQL_RETURN_IF_ERROR(
-        graph_->FindPropertyDeclarationByName(property_type.name, prop_dcl));
     ResolvedASTDeepCopyVisitor deep_copy_visitor;
     GOOGLESQL_RETURN_IF_ERROR(resolved_element->Accept(&deep_copy_visitor));
     GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<ResolvedExpr> resolved_element_copy,
                      deep_copy_visitor.ConsumeRootNode<ResolvedExpr>());
-    auto builder = ResolvedGraphGetElementPropertyBuilder()
-                       .set_type(column_type)
-                       .set_expr(std::move(resolved_element_copy))
-                       .set_property(prop_dcl);
-    if (resolver_->analyzer_options().language().LanguageFeatureEnabled(
-            FEATURE_SQL_GRAPH_DYNAMIC_ELEMENT_TYPE)) {
-      builder.set_property_name(ResolvedLiteralBuilder()
-                                    .set_value(Value::String(prop_dcl->Name()))
-                                    .set_type(types::StringType())
-                                    .set_has_explicit_type(true));
-    }
     GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<const ResolvedGraphGetElementProperty>
                          get_element_property,
-                     std::move(builder).Build());
+                     ResolveGraphGetElementProperty(
+                         ast_location, graph_,
+                         resolved_element->type()->AsGraphElement(),
+                         property_type.name,
+                         /*supports_dynamic_properties=*/
+                         resolver_->analyzer_options().language().LanguageFeatureEnabled(
+                             FEATURE_SQL_GRAPH_DYNAMIC_ELEMENT_TYPE),
+                         std::move(resolved_element_copy)));
     GOOGLESQL_ASSIGN_OR_RETURN(
         std::unique_ptr<const ResolvedComputedColumn> computed_column,
         ResolvedComputedColumnBuilder()

@@ -21,6 +21,7 @@
 
 #include "googlesql/common/errors.h"
 #include "googlesql/public/analyzer_options.h"
+#include "googlesql/public/property_graph.h"
 #include "googlesql/public/types/type.h"
 #include "absl/status/status.h"
 #include "absl/strings/ascii.h"
@@ -72,7 +73,24 @@ class InternalAnalyzerOptions {
 
   static absl::Status AddGraphProperty(const AnalyzerOptions& options,
                                        absl::string_view name,
-                                       const Type* type) {
+                                       const Type* type,
+                                       GraphPropertyDeclaration::Kind kind =
+                                           GraphPropertyDeclaration::Kind::
+                                               kScalar) {
+    GOOGLESQL_RETURN_IF_ERROR(AddGraphPropertyMetadata(options, name, type, kind));
+    const std::string lower_name = absl::AsciiStrToLower(name);
+    if (!googlesql_base::InsertIfNotPresent(
+            &(options.data_->graph_properties), std::make_pair(lower_name, type))) {
+      return MakeSqlError()
+             << "Duplicate graph property name " << lower_name;
+    }
+
+    return absl::OkStatus();
+  }
+
+  static absl::Status AddGraphPropertyMetadata(
+      const AnalyzerOptions& options, absl::string_view name, const Type* type,
+      GraphPropertyDeclaration::Kind kind) {
     if (type == nullptr) {
       return MakeSqlError()
              << "Type associated with graph property cannot be NULL";
@@ -81,18 +99,49 @@ class InternalAnalyzerOptions {
       return MakeSqlError() << "Graph property cannot have empty name";
     }
 
-    if (!googlesql_base::InsertIfNotPresent(
-            &(options.data_->graph_properties),
-            std::make_pair(absl::AsciiStrToLower(name), type))) {
-      return MakeSqlError()
-             << "Duplicate graph property name " << absl::AsciiStrToLower(name);
+    const std::string lower_name = absl::AsciiStrToLower(name);
+    const auto* existing = googlesql_base::FindOrNull(
+        options.data_->graph_property_metadata, lower_name);
+    if (existing != nullptr) {
+      if (existing->type == type && existing->kind == kind &&
+          absl::AsciiStrToLower(existing->semantic_name) == lower_name) {
+        return absl::OkStatus();
+      }
+      return MakeSqlError() << "Duplicate graph property name " << lower_name;
     }
+    googlesql_base::InsertOrDie(
+        &(options.data_->graph_property_metadata), lower_name,
+        AnalyzerOptions::Data::GraphPropertyMetadata{
+            .type = type, .kind = kind, .semantic_name = std::string(name)});
 
     return absl::OkStatus();
   }
 
   static void ClearGraphProperty(const AnalyzerOptions& options) {
     options.data_->graph_properties.clear();
+    options.data_->graph_property_metadata.clear();
+  }
+
+  static const Type* FindGraphPropertyType(const AnalyzerOptions& options,
+                                           absl::string_view name) {
+    const auto* metadata = googlesql_base::FindOrNull(
+        options.data_->graph_property_metadata, absl::AsciiStrToLower(name));
+    return metadata == nullptr ? nullptr : metadata->type;
+  }
+
+  static GraphPropertyDeclaration::Kind FindGraphPropertyKind(
+      const AnalyzerOptions& options, absl::string_view name) {
+    const auto* metadata = googlesql_base::FindOrNull(
+        options.data_->graph_property_metadata, absl::AsciiStrToLower(name));
+    return metadata == nullptr ? GraphPropertyDeclaration::Kind::kInvalid
+                               : metadata->kind;
+  }
+
+  static absl::string_view FindGraphPropertySemanticName(
+      const AnalyzerOptions& options, absl::string_view name) {
+    const auto* metadata = googlesql_base::FindOrNull(
+        options.data_->graph_property_metadata, absl::AsciiStrToLower(name));
+    return metadata == nullptr ? absl::string_view() : metadata->semantic_name;
   }
 };
 }  // namespace googlesql

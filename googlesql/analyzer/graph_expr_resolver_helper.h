@@ -88,6 +88,15 @@ absl::StatusOr<LabelSatisfyResult> ElementLabelsSatisfyResolvedGraphLabelExpr(
     const GraphDynamicLabel* dynamic_label,
     const ResolvedGraphLabelExpr* label_expr);
 
+// Resolves a graph semantic property declaration that is exposed by the given
+// graph element type. Returns nullptr when the property is not statically
+// exposed but undeclared dynamic properties are allowed.
+absl::StatusOr<const GraphPropertyDeclaration*>
+FindExposedGraphPropertyDeclaration(
+    const ASTNode* error_location, const PropertyGraph* graph,
+    const GraphElementType* element_type, absl::string_view property_name,
+    bool allows_undeclared_dynamic_properties);
+
 // Resolves a graph element's property access or a property specification using
 // `property_name` to a GraphGetElementProperty expression.
 absl::StatusOr<std::unique_ptr<const ResolvedGraphGetElementProperty>>

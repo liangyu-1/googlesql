@@ -45,6 +45,7 @@
 #include "googlesql/analyzer/expr_resolver_helper.h"
 #include "googlesql/analyzer/function_resolver.h"
 #include "googlesql/analyzer/function_signature_matcher.h"
+#include "googlesql/analyzer/graph_expr_resolver_helper.h"
 #include "googlesql/analyzer/graph_query_resolver.h"
 #include "googlesql/analyzer/input_argument_type_resolver_helper.h"
 #include "googlesql/analyzer/name_scope.h"
@@ -6750,26 +6751,15 @@ absl::Status Resolver::AddColumnFieldsToSelectList(
         continue;
       }
 
-      const GraphPropertyDeclaration* prop_dcl;
-      // TODO: Convert `FindPropertyDeclarationByName` to use
-      // StatusOr.
-      GOOGLESQL_RETURN_IF_ERROR(graph->FindPropertyDeclarationByName(name, prop_dcl));
-
-      auto builder = ResolvedGraphGetElementPropertyBuilder()
-                         .set_type(property_type)
-                         .set_expr(CopyColumnRef(src_column_ref))
-                         .set_property(prop_dcl);
-      if (language().LanguageFeatureEnabled(
-              FEATURE_SQL_GRAPH_DYNAMIC_ELEMENT_TYPE)) {
-        builder.set_property_name(
-            ResolvedLiteralBuilder()
-                .set_value(Value::String(prop_dcl->Name()))
-                .set_type(types::StringType())
-                .set_has_explicit_type(true));
-      }
-      GOOGLESQL_ASSIGN_OR_RETURN(std::unique_ptr<const ResolvedGraphGetElementProperty>
-                           get_element_property,
-                       std::move(builder).Build());
+      GOOGLESQL_ASSIGN_OR_RETURN(
+          std::unique_ptr<const ResolvedGraphGetElementProperty>
+              get_element_property,
+          ResolveGraphGetElementProperty(
+              ast_expression, graph, graph_element_type, name,
+              /*supports_dynamic_properties=*/
+              language().LanguageFeatureEnabled(
+                  FEATURE_SQL_GRAPH_DYNAMIC_ELEMENT_TYPE),
+              CopyColumnRef(src_column_ref)));
       select_column_state_list->AddSelectColumn(
           ast_select_column, property_name,
           /*is_explicit=*/false, src_column_expr_findings,

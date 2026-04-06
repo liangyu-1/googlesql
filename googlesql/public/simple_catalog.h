@@ -75,6 +75,8 @@ class SimpleTableProto;
 // This class is thread-safe.
 class SimpleCatalog : public EnumerableCatalog {
  public:
+  using PropertyGraphSqlColumnKind = googlesql::PropertyGraphSqlColumnKind;
+
   // Construct a Catalog with catalog name <name>.
   //
   // If <type_factory> is non-NULL, it will be stored (unowned) with this
@@ -325,6 +327,60 @@ class SimpleCatalog : public EnumerableCatalog {
   bool AddOwnedPropertyGraphIfNotPresent(
       absl::string_view name,
       std::unique_ptr<const PropertyGraph> property_graph)
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
+  static std::string GetPropertyGraphSqlColumnName(
+      absl::string_view graph_name, PropertyGraphSqlColumnKind kind,
+      absl::string_view semantic_name = "");
+  absl::Status FindPropertyGraphSqlColumn(
+      const Table& table, absl::string_view graph_name,
+      PropertyGraphSqlColumnKind kind, const Column** column,
+      absl::string_view semantic_name = "") const;
+  absl::Status FindPropertyGraphSqlColumn(
+      const PropertyGraph& graph, const GraphElementTable& element_table,
+      PropertyGraphSqlColumnKind kind, const Column** column,
+      absl::string_view semantic_name = "") const;
+  absl::Status FindPropertyGraphPropertyColumn(
+      const PropertyGraph& graph, const GraphElementTable& element_table,
+      const GraphPropertyDeclaration& property_declaration,
+      const Column** column) const;
+  absl::Status FindPropertyGraphDynamicLabelColumn(
+      const PropertyGraph& graph, const GraphElementTable& element_table,
+      const Column** column) const;
+  absl::Status FindPropertyGraphDynamicPropertiesColumn(
+      const PropertyGraph& graph, const GraphElementTable& element_table,
+      const Column** column) const;
+  absl::Status FindPropertyGraphSourceColumn(const PropertyGraph& graph,
+                                             const GraphEdgeTable& edge_table,
+                                             const Column** column) const;
+  absl::Status FindPropertyGraphDestinationColumn(
+      const PropertyGraph& graph, const GraphEdgeTable& edge_table,
+      const Column** column) const;
+  absl::Status FindPropertyGraphOutgoingColumn(const PropertyGraph& graph,
+                                               const GraphEdgeTable& edge_table,
+                                               const Column** column) const;
+  absl::Status FindPropertyGraphIncomingColumn(const PropertyGraph& graph,
+                                               const GraphEdgeTable& edge_table,
+                                               const Column** column) const;
+  absl::Status FindPropertyGraphRelationSqlColumns(
+      const PropertyGraph& graph, const GraphEdgeTable& edge_table,
+      PropertyGraphRelationSqlColumns& columns) const;
+  absl::Status FindPropertyGraphElementSqlColumns(
+      const PropertyGraph& graph, const GraphElementTable& element_table,
+      PropertyGraphElementSqlColumns& columns) const;
+
+  // Projects property-graph semantics into SQL pseudo-columns so the same
+  // graph definition can be consumed from SQL analyzer paths.
+  absl::Status AddPropertyGraphSqlSemantics(const PropertyGraph& property_graph)
+      ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::Status AddPropertyGraphSqlSemantics()
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
+  // Projects property-graph relations into SQL join-column pseudo-columns so
+  // the same graph definition can be navigated from SQL.
+  absl::Status AddPropertyGraphSqlNavigation(const PropertyGraph& property_graph)
+      ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::Status AddPropertyGraphSqlNavigation()
       ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Add GoogleSQL built-in function definitions into this catalog. `options`

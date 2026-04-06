@@ -185,6 +185,7 @@ proto_library(
     deps = [
         "//googlesql/public:annotation_proto",
         "//googlesql/public:type_proto",
+        "//googlesql/resolved_ast:serialization_proto",
     ],
 )
 

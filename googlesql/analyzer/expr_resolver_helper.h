@@ -198,6 +198,10 @@ struct ExprResolutionInfoOptions {
   // Indicates whether the expression is an expression of a graph measure
   // property.
   bool is_graph_measure_expression = false;
+
+  // Indicates whether the expression may reference previously-declared graph
+  // properties by semantic name.
+  bool allows_graph_property_reference = false;
 };
 
 // This contains common info needed to resolve and validate an expression.
@@ -300,6 +304,10 @@ struct ExprResolutionInfo {
   // Indicates whether the expression is an expression of a graph measure
   // property.
   const bool is_graph_measure_expression = false;
+
+  // Indicates whether this expression may reference previously-declared graph
+  // properties by semantic name.
+  const bool allows_graph_property_reference = false;
 
   // <clause_name> is used to generate an error saying aggregation/analytic
   // functions are not allowed in this clause, e.g. "WHERE clause".  It is

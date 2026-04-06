@@ -50,6 +50,7 @@
 #include "googlesql/public/types/type.h"
 #include "googlesql/public/types/type_deserializer.h"
 #include "googlesql/public/types/type_factory.h"
+#include "googlesql/public/types/row_type.h"
 #include "googlesql/public/value.h"
 #include "googlesql/base/case.h"
 #include "absl/container/btree_map.h"
@@ -59,6 +60,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
@@ -72,6 +74,316 @@
 #include "googlesql/base/clock.h"
 
 namespace googlesql {
+
+namespace {
+
+std::string MaybePluralize(absl::string_view name) {
+  std::string result(name);
+  if (!absl::EndsWithIgnoreCase(result, "s")) {
+    result.append("s");
+  }
+  return result;
+}
+
+absl::StatusOr<std::vector<const Column*>> LookupColumnsByIndex(
+    const Table& table, absl::Span<const int> column_indexes) {
+  std::vector<const Column*> columns;
+  columns.reserve(column_indexes.size());
+  for (int index : column_indexes) {
+    const Column* column = table.GetColumn(index);
+    if (column == nullptr) {
+      return ::googlesql_base::InvalidArgumentErrorBuilder()
+             << "Invalid graph navigation column index " << index
+             << " for table " << table.FullName();
+    }
+    columns.push_back(column);
+  }
+  return columns;
+}
+
+bool SameJoinColumnDefinition(
+    const Column::JoinColumnAttributes& existing,
+    const std::vector<const Column*>& source_columns, const Table* target_table,
+    const std::vector<const Column*>& target_columns, bool is_multi) {
+  if (existing.target_table() != target_table || existing.is_multi() != is_multi
+      || existing.source_columns().size() != source_columns.size() ||
+      existing.target_columns().size() != target_columns.size()) {
+    return false;
+  }
+  for (int i = 0; i < source_columns.size(); ++i) {
+    if (existing.source_columns()[i] != source_columns[i]) {
+      return false;
+    }
+  }
+  for (int i = 0; i < target_columns.size(); ++i) {
+    if (existing.target_columns()[i] != target_columns[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool SameRowIdentityColumns(const std::optional<std::vector<int>>& lhs,
+                            const std::optional<std::vector<int>>& rhs) {
+  if (!lhs.has_value() || !rhs.has_value()) {
+    return lhs.has_value() == rhs.has_value();
+  }
+  return *lhs == *rhs;
+}
+
+bool SameExpressionColumnDefinition(
+    const Column& existing,
+    const Column::ExpressionAttributes::ExpressionKind expression_kind,
+    absl::string_view expression_string, const Type* type,
+    const AnnotationMap* type_annotation_map,
+    const std::optional<std::vector<int>>& row_identity_columns) {
+  const auto existing_expr = existing.GetExpression();
+  return existing_expr.has_value() && existing.GetJoinColumn() == std::nullopt &&
+         existing.GetType()->Equals(type) &&
+         existing.GetTypeAnnotationMap() == type_annotation_map &&
+         existing_expr->GetExpressionKind() == expression_kind &&
+         existing_expr->GetExpressionString() == expression_string &&
+         SameRowIdentityColumns(existing_expr->RowIdentityColumns(),
+                                row_identity_columns);
+}
+
+absl::Status AddSqlJoinColumn(SimpleCatalog& catalog, SimpleTable& source_table,
+                              absl::string_view column_name,
+                              const Table& target_table, bool is_multi,
+                              const std::vector<const Column*>& source_columns,
+                              const std::vector<const Column*>& target_columns) {
+  const Column* existing =
+      source_table.FindColumnByName(std::string(column_name));
+  if (existing != nullptr) {
+    const auto existing_join = existing->GetJoinColumn();
+    if (existing_join.has_value() &&
+        SameJoinColumnDefinition(*existing_join, source_columns, &target_table,
+                                 target_columns, is_multi)) {
+      return absl::OkStatus();
+    }
+    return ::googlesql_base::AlreadyExistsErrorBuilder()
+           << "Cannot add SQL navigation column " << column_name << " to table "
+           << source_table.FullName()
+           << " because a different column with that name already exists";
+  }
+
+  const RowType* row_type;
+  GOOGLESQL_RETURN_IF_ERROR(catalog.type_factory()->MakeRowType(
+      &target_table, target_table.FullName(), is_multi, target_columns,
+      &source_table, source_columns, &row_type));
+  return source_table.AddColumn(std::make_unique<SimpleColumn>(
+      source_table.FullName(), std::string(column_name), row_type,
+      SimpleColumn::Attributes{
+          .is_pseudo_column = true,
+          .is_writable_column = false,
+          .join_column = Column::JoinColumnAttributes(
+              source_columns, &target_table, target_columns, is_multi),
+      }));
+}
+
+absl::Status AddSqlExpressionColumn(
+    SimpleTable& source_table, absl::string_view column_name,
+    AnnotatedType annotated_type,
+    Column::ExpressionAttributes::ExpressionKind expression_kind,
+    absl::string_view expression_string, const ResolvedExpr& resolved_expr,
+    std::optional<std::vector<int>> row_identity_columns = std::nullopt) {
+  const Column* existing =
+      source_table.FindColumnByName(std::string(column_name));
+  if (existing != nullptr) {
+    if (SameExpressionColumnDefinition(*existing, expression_kind,
+                                       expression_string, annotated_type.type,
+                                       annotated_type.annotation_map,
+                                       row_identity_columns)) {
+      return absl::OkStatus();
+    }
+    return ::googlesql_base::AlreadyExistsErrorBuilder()
+           << "Cannot add SQL semantic column " << column_name << " to table "
+           << source_table.FullName()
+           << " because a different column with that name already exists";
+  }
+
+  GOOGLESQL_ASSIGN_OR_RETURN(
+      auto expression_attributes,
+      SimpleColumn::ExpressionAttributes::Create(
+          expression_kind, std::string(expression_string), &resolved_expr,
+          row_identity_columns));
+  return source_table.AddColumn(std::make_unique<SimpleColumn>(
+      source_table.FullName(), std::string(column_name), annotated_type,
+      SimpleColumn::Attributes{
+          .is_pseudo_column = true,
+          .is_writable_column = false,
+          .column_expression = std::move(expression_attributes),
+      }));
+}
+
+absl::Status AddSqlPropertyColumnsForElementTable(const PropertyGraph& graph,
+                                                  const GraphElementTable& table) {
+  if (!table.GetTable()->Is<SimpleTable>()) {
+    return ::googlesql_base::UnimplementedErrorBuilder()
+           << "Graph-driven SQL semantic columns require SimpleTable backing "
+           << "for " << table.GetTable()->FullName();
+  }
+  auto* simple_table =
+      const_cast<SimpleTable*>(table.GetTable()->GetAs<SimpleTable>());
+
+  std::vector<const GraphPropertyDefinition*> property_definitions =
+      googlesql::GetPropertyDefinitionsInDeclarationOrder(table);
+  for (const GraphPropertyDefinition* property_definition :
+       property_definitions) {
+    const absl::StatusOr<const ResolvedExpr*> resolved_expr =
+        property_definition->GetValueExpression();
+    if (!resolved_expr.ok()) {
+      continue;
+    }
+
+    const GraphPropertyDeclaration& declaration =
+        property_definition->GetDeclaration();
+    Column::ExpressionAttributes::ExpressionKind expression_kind =
+        declaration.kind() == GraphPropertyDeclaration::Kind::kMeasure
+            ? Column::ExpressionAttributes::ExpressionKind::MEASURE_EXPRESSION
+            : Column::ExpressionAttributes::ExpressionKind::GENERATED;
+
+    std::optional<std::vector<int>> row_identity_columns = std::nullopt;
+    if (declaration.kind() == GraphPropertyDeclaration::Kind::kMeasure) {
+      row_identity_columns = table.GetKeyColumns();
+    }
+
+    GOOGLESQL_RETURN_IF_ERROR(AddSqlExpressionColumn(
+        *simple_table,
+        GetPropertyGraphSqlColumnName(
+            graph.Name(), SimpleCatalog::PropertyGraphSqlColumnKind::kProperty,
+            declaration.Name()),
+        declaration.GetAnnotatedType(), expression_kind,
+        property_definition->expression_sql(), **resolved_expr,
+        row_identity_columns));
+  }
+
+  if (table.HasDynamicLabel()) {
+    const GraphDynamicLabel* dynamic_label = nullptr;
+    GOOGLESQL_RETURN_IF_ERROR(table.GetDynamicLabel(dynamic_label));
+    if (dynamic_label != nullptr) {
+      const absl::StatusOr<const ResolvedExpr*> resolved_expr =
+          dynamic_label->GetValueExpression();
+      if (resolved_expr.ok()) {
+        GOOGLESQL_RETURN_IF_ERROR(AddSqlExpressionColumn(
+            *simple_table,
+            GetPropertyGraphSqlColumnName(
+                graph.Name(),
+                SimpleCatalog::PropertyGraphSqlColumnKind::kDynamicLabel),
+            AnnotatedType((*resolved_expr)->type(),
+                          (*resolved_expr)->type_annotation_map()),
+            Column::ExpressionAttributes::ExpressionKind::GENERATED,
+            dynamic_label->label_expression(), **resolved_expr));
+      }
+    }
+  }
+
+  if (table.HasDynamicProperties()) {
+    const GraphDynamicProperties* dynamic_properties = nullptr;
+    GOOGLESQL_RETURN_IF_ERROR(table.GetDynamicProperties(dynamic_properties));
+    if (dynamic_properties != nullptr) {
+      const absl::StatusOr<const ResolvedExpr*> resolved_expr =
+          dynamic_properties->GetValueExpression();
+      if (resolved_expr.ok()) {
+        GOOGLESQL_RETURN_IF_ERROR(AddSqlExpressionColumn(
+            *simple_table,
+            GetPropertyGraphSqlColumnName(
+                graph.Name(),
+                SimpleCatalog::PropertyGraphSqlColumnKind::kDynamicProperties),
+            AnnotatedType((*resolved_expr)->type(),
+                          (*resolved_expr)->type_annotation_map()),
+            Column::ExpressionAttributes::ExpressionKind::GENERATED,
+            dynamic_properties->properties_expression(), **resolved_expr));
+      }
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status AddSqlNavigationColumnsForEdgeTable(
+    const PropertyGraph& graph, const GraphEdgeTable& edge_table,
+    SimpleCatalog& catalog) {
+  if (!edge_table.GetTable()->Is<SimpleTable>()) {
+    return ::googlesql_base::UnimplementedErrorBuilder()
+           << "Graph-driven SQL navigation requires SimpleTable backing for "
+           << edge_table.GetTable()->FullName();
+  }
+  SimpleTable* edge_simple =
+      const_cast<SimpleTable*>(edge_table.GetTable()->GetAs<SimpleTable>());
+
+  const GraphNodeTableReference& source_ref =
+      googlesql::GetSourceNodeTableReference(edge_table);
+  const GraphNodeTableReference& dest_ref =
+      googlesql::GetDestinationNodeTableReference(edge_table);
+  const GraphNodeTable* source_node = source_ref.GetReferencedNodeTable();
+  const GraphNodeTable* dest_node = dest_ref.GetReferencedNodeTable();
+  if (!source_node->GetTable()->Is<SimpleTable>() ||
+      !dest_node->GetTable()->Is<SimpleTable>()) {
+    return ::googlesql_base::UnimplementedErrorBuilder()
+           << "Graph-driven SQL navigation requires SimpleTable backing for "
+           << "node tables referenced by " << edge_table.FullName();
+  }
+  SimpleTable* source_simple =
+      const_cast<SimpleTable*>(source_node->GetTable()->GetAs<SimpleTable>());
+  SimpleTable* dest_simple =
+      const_cast<SimpleTable*>(dest_node->GetTable()->GetAs<SimpleTable>());
+  const PropertyGraphRelationMetadata relation_metadata =
+      googlesql::GetPropertyGraphRelationMetadata(edge_table);
+
+  GOOGLESQL_ASSIGN_OR_RETURN(
+      std::vector<const Column*> source_edge_columns,
+      LookupColumnsByIndex(*edge_table.GetTable(),
+                           source_ref->GetEdgeTableColumns()));
+  GOOGLESQL_ASSIGN_OR_RETURN(
+      std::vector<const Column*> source_node_columns,
+      LookupColumnsByIndex(*source_node->GetTable(),
+                           source_ref->GetNodeTableColumns()));
+  GOOGLESQL_ASSIGN_OR_RETURN(
+      std::vector<const Column*> dest_edge_columns,
+      LookupColumnsByIndex(*edge_table.GetTable(),
+                           dest_ref->GetEdgeTableColumns()));
+  GOOGLESQL_ASSIGN_OR_RETURN(
+      std::vector<const Column*> dest_node_columns,
+      LookupColumnsByIndex(*dest_node->GetTable(),
+                           dest_ref->GetNodeTableColumns()));
+
+  GOOGLESQL_RETURN_IF_ERROR(AddSqlJoinColumn(
+      catalog, *edge_simple,
+      GetPropertyGraphSqlColumnName(
+          graph.Name(), SimpleCatalog::PropertyGraphSqlColumnKind::kSource,
+          relation_metadata.source_exposure_name),
+      *source_node->GetTable(), relation_metadata.source_is_multi,
+      source_edge_columns,
+      source_node_columns));
+  GOOGLESQL_RETURN_IF_ERROR(AddSqlJoinColumn(
+      catalog, *edge_simple,
+      GetPropertyGraphSqlColumnName(
+          graph.Name(),
+          SimpleCatalog::PropertyGraphSqlColumnKind::kDestination,
+          relation_metadata.destination_exposure_name),
+      *dest_node->GetTable(), relation_metadata.destination_is_multi,
+      dest_edge_columns,
+      dest_node_columns));
+  GOOGLESQL_RETURN_IF_ERROR(AddSqlJoinColumn(
+      catalog, *source_simple,
+      GetPropertyGraphSqlColumnName(
+          graph.Name(), SimpleCatalog::PropertyGraphSqlColumnKind::kOutgoing,
+          MaybePluralize(relation_metadata.outgoing_exposure_name)),
+      *edge_table.GetTable(), relation_metadata.outgoing_is_multi,
+      source_node_columns,
+      source_edge_columns));
+  GOOGLESQL_RETURN_IF_ERROR(AddSqlJoinColumn(
+      catalog, *dest_simple,
+      GetPropertyGraphSqlColumnName(
+          graph.Name(), SimpleCatalog::PropertyGraphSqlColumnKind::kIncoming,
+          MaybePluralize(relation_metadata.incoming_exposure_name)),
+      *edge_table.GetTable(), relation_metadata.incoming_is_multi,
+      dest_node_columns,
+      dest_edge_columns));
+  return absl::OkStatus();
+}
+
+}  // namespace
 
 SimpleCatalog::SimpleCatalog(absl::string_view name, TypeFactory* type_factory)
     : name_(name), type_factory_(type_factory) {}
@@ -873,6 +1185,134 @@ bool SimpleCatalog::AddOwnedPropertyGraphIfNotPresent(
   return true;
 }
 
+// static
+std::string SimpleCatalog::GetPropertyGraphSqlColumnName(
+    absl::string_view graph_name, PropertyGraphSqlColumnKind kind,
+    absl::string_view semantic_name) {
+  return googlesql::GetPropertyGraphSqlColumnName(graph_name, kind,
+                                                  semantic_name);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphSqlColumn(
+    const Table& table, absl::string_view graph_name,
+    PropertyGraphSqlColumnKind kind, const Column** column,
+    absl::string_view semantic_name) const {
+  return googlesql::FindPropertyGraphSqlColumn(table, graph_name, kind, column,
+                                               semantic_name);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphSqlColumn(
+    const PropertyGraph& graph, const GraphElementTable& element_table,
+    PropertyGraphSqlColumnKind kind, const Column** column,
+    absl::string_view semantic_name) const {
+  return googlesql::FindPropertyGraphSqlColumn(graph, element_table, kind,
+                                               column, semantic_name);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphPropertyColumn(
+    const PropertyGraph& graph, const GraphElementTable& element_table,
+    const GraphPropertyDeclaration& property_declaration,
+    const Column** column) const {
+  return googlesql::FindPropertyGraphPropertyColumn(graph, element_table,
+                                                    property_declaration,
+                                                    column);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphDynamicLabelColumn(
+    const PropertyGraph& graph, const GraphElementTable& element_table,
+    const Column** column) const {
+  return googlesql::FindPropertyGraphDynamicLabelColumn(graph, element_table,
+                                                        column);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphDynamicPropertiesColumn(
+    const PropertyGraph& graph, const GraphElementTable& element_table,
+    const Column** column) const {
+  return googlesql::FindPropertyGraphDynamicPropertiesColumn(
+      graph, element_table, column);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphSourceColumn(
+    const PropertyGraph& graph, const GraphEdgeTable& edge_table,
+    const Column** column) const {
+  return googlesql::FindPropertyGraphSourceColumn(graph, edge_table, column);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphDestinationColumn(
+    const PropertyGraph& graph, const GraphEdgeTable& edge_table,
+    const Column** column) const {
+  return googlesql::FindPropertyGraphDestinationColumn(graph, edge_table,
+                                                       column);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphOutgoingColumn(
+    const PropertyGraph& graph, const GraphEdgeTable& edge_table,
+    const Column** column) const {
+  return googlesql::FindPropertyGraphOutgoingColumn(graph, edge_table, column);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphIncomingColumn(
+    const PropertyGraph& graph, const GraphEdgeTable& edge_table,
+    const Column** column) const {
+  return googlesql::FindPropertyGraphIncomingColumn(graph, edge_table, column);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphRelationSqlColumns(
+    const PropertyGraph& graph, const GraphEdgeTable& edge_table,
+    PropertyGraphRelationSqlColumns& columns) const {
+  return googlesql::FindPropertyGraphRelationSqlColumns(graph, edge_table,
+                                                        columns);
+}
+
+absl::Status SimpleCatalog::FindPropertyGraphElementSqlColumns(
+    const PropertyGraph& graph, const GraphElementTable& element_table,
+    PropertyGraphElementSqlColumns& columns) const {
+  return googlesql::FindPropertyGraphElementSqlColumns(graph, element_table,
+                                                       columns);
+}
+
+absl::Status SimpleCatalog::AddPropertyGraphSqlSemantics(
+    const PropertyGraph& property_graph) {
+  for (const GraphNodeTable* node_table :
+       googlesql::GetNodeTablesInDeclarationOrder(property_graph)) {
+    GOOGLESQL_RETURN_IF_ERROR(
+        AddSqlPropertyColumnsForElementTable(property_graph, *node_table));
+  }
+
+  for (const GraphEdgeTable* edge_table :
+       googlesql::GetEdgeTablesInDeclarationOrder(property_graph)) {
+    GOOGLESQL_RETURN_IF_ERROR(
+        AddSqlPropertyColumnsForElementTable(property_graph, *edge_table));
+    GOOGLESQL_RETURN_IF_ERROR(
+        AddSqlNavigationColumnsForEdgeTable(property_graph, *edge_table, *this));
+  }
+  return absl::OkStatus();
+}
+
+absl::Status SimpleCatalog::AddPropertyGraphSqlSemantics() {
+  for (const PropertyGraph* property_graph : property_graphs()) {
+    GOOGLESQL_RETURN_IF_ERROR(AddPropertyGraphSqlSemantics(*property_graph));
+  }
+  return absl::OkStatus();
+}
+
+absl::Status SimpleCatalog::AddPropertyGraphSqlNavigation(
+    const PropertyGraph& property_graph) {
+  for (const GraphEdgeTable* edge_table :
+       googlesql::GetEdgeTablesInDeclarationOrder(property_graph)) {
+    GOOGLESQL_RETURN_IF_ERROR(
+        AddSqlNavigationColumnsForEdgeTable(property_graph, *edge_table, *this));
+  }
+  return absl::OkStatus();
+}
+
+absl::Status SimpleCatalog::AddPropertyGraphSqlNavigation() {
+  for (const PropertyGraph* property_graph : property_graphs()) {
+    GOOGLESQL_RETURN_IF_ERROR(AddPropertyGraphSqlNavigation(*property_graph));
+  }
+  return absl::OkStatus();
+}
+
 SimpleCatalog* SimpleCatalog::MakeOwnedSimpleCatalog(absl::string_view name) {
   SimpleCatalog* new_catalog = new SimpleCatalog(name, type_factory());
   AddOwnedCatalog(new_catalog);
@@ -1401,6 +1841,8 @@ absl::Status SimpleCatalog::DeserializeImpl(
              << "' in serialized catalog";
     }
   }
+
+  GOOGLESQL_RETURN_IF_ERROR(AddPropertyGraphSqlSemantics());
 
   return absl::OkStatus();
 }

@@ -11119,6 +11119,20 @@ ResolvedArgumentRef(y)
               vector=True,
               is_optional_constructor_arg=True,
           ),
+          Field(
+              'relation_declaration_list',
+              'ResolvedGraphRelationshipDeclaration',
+              tag_id=7,
+              ignorable=IGNORABLE_DEFAULT,
+              vector=True,
+              is_optional_constructor_arg=True,
+              comment="""
+                Semantic relation declarations derived for this property graph.
+                These declarations make graph relation exposure and cardinality
+                explicit in the resolved AST instead of requiring downstream
+                consumers to infer them entirely from edge tables.
+                      """,
+          ),
       ],
   )
 
@@ -11374,6 +11388,35 @@ ResolvedArgumentRef(y)
      """,
       fields=[
           Field('property_expr', 'ResolvedExpr', tag_id=2),
+      ],
+  )
+
+  gen.AddNode(
+      name='ResolvedGraphRelationshipDeclaration',
+      tag_id=292,
+      parent='ResolvedArgument',
+      comment="""
+       Explicit semantic relation metadata for a graph edge exposure.
+       This captures the relation names and cardinality used by analyzer and
+       catalog consumers, even when they are currently derived from edge-table
+       definitions.
+     """,
+      fields=[
+          Field('edge_table_alias', SCALAR_STRING, tag_id=2),
+          Field('source_node_identifier', SCALAR_STRING, tag_id=3),
+          Field('destination_node_identifier', SCALAR_STRING, tag_id=4),
+          Field('source_name', SCALAR_STRING, tag_id=5),
+          Field('destination_name', SCALAR_STRING, tag_id=6),
+          Field('outgoing_name', SCALAR_STRING, tag_id=7),
+          Field('incoming_name', SCALAR_STRING, tag_id=8),
+          Field('source_is_multi', SCALAR_BOOL, tag_id=9,
+                ignorable=IGNORABLE_DEFAULT),
+          Field('destination_is_multi', SCALAR_BOOL, tag_id=10,
+                ignorable=IGNORABLE_DEFAULT),
+          Field('outgoing_is_multi', SCALAR_BOOL, tag_id=11,
+                ignorable=IGNORABLE_DEFAULT),
+          Field('incoming_is_multi', SCALAR_BOOL, tag_id=12,
+                ignorable=IGNORABLE_DEFAULT),
       ],
   )
 

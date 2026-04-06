@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "googlesql/common/internal_analyzer_options.h"
 #include "googlesql/common/internal_property_graph.h"
 #include "googlesql/public/analyzer.h"
 #include "googlesql/public/analyzer_options.h"
@@ -44,6 +45,7 @@
 #include "googlesql/resolved_ast/resolved_ast.h"
 #include "googlesql/resolved_ast/resolved_ast_enums.pb.h"
 #include "googlesql/resolved_ast/resolved_node_kind.pb.h"
+#include "googlesql/base/case.h"
 #include "absl/base/nullability.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
@@ -363,21 +365,53 @@ static absl::StatusOr<std::vector<int>> GetColumnIndices(
 
 static absl::Status ValidatePropertyDefinition(
     const GraphPropertyDeclaration& property_decl) {
-  GOOGLESQL_RET_CHECK(property_decl.kind() != GraphPropertyDeclaration::Kind::kInvalid)
+  GOOGLESQL_RET_CHECK(property_decl.kind() !=
+              GraphPropertyDeclaration::Kind::kInvalid)
       << property_decl.Name();
-  if (property_decl.kind() == GraphPropertyDeclaration::Kind::kMeasure) {
-    return absl::UnimplementedError(
-        absl::StrFormat("Measure property definitions are not yet supported. "
-                        "Property: %s",
-                        property_decl.Name()));
-  }
   return absl::OkStatus();
+}
+
+static GraphPropertySemanticMetadata GetPropertySemanticMetadata(
+    const std::vector<std::unique_ptr<const ResolvedOption>>& options_list) {
+  GraphPropertySemanticMetadata metadata;
+  for (const std::unique_ptr<const ResolvedOption>& option : options_list) {
+    const ResolvedExpr* value_expr = option->value();
+    if (value_expr == nullptr || !value_expr->Is<ResolvedLiteral>()) {
+      continue;
+    }
+    const Value& value = value_expr->GetAs<ResolvedLiteral>()->value();
+    if (googlesql_base::CaseEqual(option->name(), "description") &&
+        value.type()->IsString()) {
+      metadata.description = value.string_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "display_name") &&
+               value.type()->IsString()) {
+      metadata.display_name = value.string_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "semantic_role") &&
+               value.type()->IsString()) {
+      metadata.semantic_role = value.string_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "hidden") &&
+               value.type()->IsBool()) {
+      metadata.hidden = value.bool_value();
+    } else if (googlesql_base::CaseEqual(option->name(), "semantic_aliases") &&
+               value.type()->IsArray() &&
+               value.type()->AsArray()->element_type()->IsString()) {
+      metadata.semantic_aliases.clear();
+      metadata.semantic_aliases.reserve(value.num_elements());
+      for (int i = 0; i < value.num_elements(); ++i) {
+        metadata.semantic_aliases.push_back(value.element(i).string_value());
+      }
+    }
+  }
+  return metadata;
 }
 
 template <typename ElementTableType>
 static absl::Status AddElementTable(
     const ResolvedGraphElementTable* resolved_element_table,
-    SimplePropertyGraph& graph) {
+    SimplePropertyGraph& graph,
+    const absl::flat_hash_map<std::string,
+                              const ResolvedGraphRelationshipDeclaration*>&
+        relation_declaration_by_edge_alias = {}) {
   GOOGLESQL_RET_CHECK(resolved_element_table->input_scan()->Is<ResolvedTableScan>());
   const Table* table =
       resolved_element_table->input_scan()->GetAs<ResolvedTableScan>()->table();
@@ -392,16 +426,19 @@ static absl::Status AddElementTable(
         def->property_declaration_name(), property_decl));
     GOOGLESQL_RETURN_IF_ERROR(ValidatePropertyDefinition(*property_decl));
     auto property_def = std::make_unique<SimpleGraphPropertyDefinition>(
-        property_decl, def->sql());
+        property_decl, def->sql(),
+        GetPropertySemanticMetadata(def->options_list()));
+    InternalPropertyGraph::InternalSetResolvedExpr(property_def.get(),
+                                                   def->expr());
     property_defs.push_back(std::move(property_def));
   }
 
   // Static labels.
-  absl::flat_hash_set<const GraphElementLabel*> labels;
+  std::vector<const GraphElementLabel*> labels;
   for (const auto& label_name : resolved_element_table->label_name_list()) {
     const GraphElementLabel* label;
     GOOGLESQL_RETURN_IF_ERROR(graph.FindLabelByName(label_name, label));
-    labels.insert(label);
+    labels.push_back(label);
   }
 
   // Dynamic properties.
@@ -486,10 +523,30 @@ static absl::Status AddElementTable(
     GOOGLESQL_ASSIGN_OR_RETURN(
         auto dest_node,
         reference_builder(resolved_element_table->dest_node_reference()));
+    PropertyGraphRelationMetadata relation_metadata;
+    auto found_relation =
+        relation_declaration_by_edge_alias.find(resolved_element_table->alias());
+    if (found_relation != relation_declaration_by_edge_alias.end()) {
+      const ResolvedGraphRelationshipDeclaration* relation_decl =
+          found_relation->second;
+      relation_metadata = PropertyGraphRelationMetadata{
+          .edge_table = nullptr,
+          .source_node_table = source_node->GetReferencedNodeTable(),
+          .destination_node_table = dest_node->GetReferencedNodeTable(),
+          .source_exposure_name = relation_decl->source_name(),
+          .destination_exposure_name = relation_decl->destination_name(),
+          .outgoing_exposure_name = relation_decl->outgoing_name(),
+          .incoming_exposure_name = relation_decl->incoming_name(),
+          .source_is_multi = relation_decl->source_is_multi(),
+          .destination_is_multi = relation_decl->destination_is_multi(),
+          .outgoing_is_multi = relation_decl->outgoing_is_multi(),
+          .incoming_is_multi = relation_decl->incoming_is_multi(),
+      };
+    }
     element_table = std::make_unique<SimpleGraphEdgeTable>(
         resolved_element_table->alias(), graph.NamePath(), table,
         std::move(key_indices), std::move(labels), std::move(property_defs),
-        std::move(source_node), std::move(dest_node),
+        std::move(source_node), std::move(dest_node), relation_metadata,
         std::move(element_table_dynamic_label),
         std::move(element_table_dynamic_properties)
     );
@@ -504,13 +561,25 @@ PopulatePropertyGraph(
     const ResolvedCreatePropertyGraphStmt* create_graph_stmt) {
   auto graph =
       std::make_unique<SimplePropertyGraph>(create_graph_stmt->name_path());
+  absl::flat_hash_map<std::string, const ResolvedGraphRelationshipDeclaration*>
+      relation_declaration_by_edge_alias;
+  for (const auto& relation_decl :
+       create_graph_stmt->relation_declaration_list()) {
+    relation_declaration_by_edge_alias.emplace(relation_decl->edge_table_alias(),
+                                               relation_decl.get());
+  }
   // Add all property declarations.
   for (const auto& resolved_property_decl :
        create_graph_stmt->property_declaration_list()) {
+    GraphPropertyDeclaration::Kind property_kind =
+        resolved_property_decl->is_measure()
+            ? GraphPropertyDeclaration::Kind::kMeasure
+            : GraphPropertyDeclaration::Kind::kScalar;
     graph->AddPropertyDeclaration(
         std::make_unique<SimpleGraphPropertyDeclaration>(
             resolved_property_decl->name(), graph->NamePath(),
-            resolved_property_decl->type()));
+            resolved_property_decl->type(),
+            resolved_property_decl->type_annotation_map(), property_kind));
   }
   // Add all labels.
   for (const auto& resolved_label : create_graph_stmt->label_list()) {
@@ -532,7 +601,8 @@ PopulatePropertyGraph(
   }
   // Add all edge tables.
   for (const auto& edge_table : create_graph_stmt->edge_table_list()) {
-    GOOGLESQL_RETURN_IF_ERROR(AddElementTable<GraphEdgeTable>(edge_table.get(), *graph));
+    GOOGLESQL_RETURN_IF_ERROR(AddElementTable<GraphEdgeTable>(
+        edge_table.get(), *graph, relation_declaration_by_edge_alias));
   }
 
   return std::move(graph);
@@ -548,20 +618,11 @@ static absl::Status ResolveGraphPropertyDefinitions(
   AnalyzerOptions options(language_options);
   options.CreateDefaultArenasIfNotSet();
 
-  absl::flat_hash_set<const GraphNodeTable*> node_tables;
-  GOOGLESQL_RET_CHECK_OK(graph->GetNodeTables(node_tables));
-  absl::flat_hash_set<const GraphEdgeTable*> edge_tables;
-  GOOGLESQL_RET_CHECK_OK(graph->GetEdgeTables(edge_tables));
-
-  std::vector<const GraphElementTable*> element_tables;
-  for (const GraphNodeTable* node_table : node_tables) {
-    element_tables.push_back(node_table);
-  }
-  for (const GraphEdgeTable* edge_table : edge_tables) {
-    element_tables.push_back(edge_table);
-  }
+  std::vector<const GraphElementTable*> element_tables =
+      googlesql::GetElementTablesInDeclarationOrder(*graph);
 
   for (const GraphElementTable* element_table : element_tables) {
+    InternalAnalyzerOptions::ClearGraphProperty(options);
     options.SetLookupCatalogColumnCallback(
         [element_table](
             const std::string& column_name) -> absl::StatusOr<const Column*> {
@@ -574,21 +635,67 @@ static absl::Status ResolveGraphPropertyDefinitions(
           return column;
         });
 
-    absl::flat_hash_set<const GraphPropertyDefinition*> property_definitions;
-    GOOGLESQL_RETURN_IF_ERROR(
-        element_table->GetPropertyDefinitions(property_definitions));
+    std::vector<const GraphPropertyDefinition*> property_definitions =
+        googlesql::GetPropertyDefinitionsInDeclarationOrder(*element_table);
+    std::vector<const GraphPropertyDefinition*> unresolved_property_definitions;
+    unresolved_property_definitions.reserve(property_definitions.size());
     for (const GraphPropertyDefinition* definition : property_definitions) {
+      GOOGLESQL_RETURN_IF_ERROR(InternalAnalyzerOptions::AddGraphPropertyMetadata(
+          options, definition->GetDeclaration().Name(),
+          definition->GetDeclaration().Type(),
+          definition->GetDeclaration().kind()));
       GOOGLESQL_RET_CHECK(definition->Is<SimpleGraphPropertyDefinition>());
-      std::unique_ptr<const AnalyzerOutput> analyzer_output;
-      GOOGLESQL_RETURN_IF_ERROR(AnalyzeExpression(definition->expression_sql(), options,
-                                        catalog, catalog->type_factory(),
-                                        &analyzer_output));
+      if (definition->GetValueExpression().ok()) {
+        if (definition->GetDeclaration().kind() ==
+            GraphPropertyDeclaration::Kind::kScalar) {
+          GOOGLESQL_RETURN_IF_ERROR(InternalAnalyzerOptions::AddGraphProperty(
+              options, definition->GetDeclaration().Name(),
+              definition->GetDeclaration().Type(),
+              definition->GetDeclaration().kind()));
+        }
+        continue;
+      }
+      unresolved_property_definitions.push_back(definition);
+    }
 
-      InternalPropertyGraph::InternalSetResolvedExpr(
-          const_cast<SimpleGraphPropertyDefinition*>(
-              definition->GetAs<SimpleGraphPropertyDefinition>()),
-          analyzer_output->resolved_expr());
-      artifacts.push_back(std::move(analyzer_output));
+    while (!unresolved_property_definitions.empty()) {
+      bool made_progress = false;
+      absl::Status first_error;
+      std::vector<const GraphPropertyDefinition*> remaining_property_defs;
+      remaining_property_defs.reserve(unresolved_property_definitions.size());
+      for (const GraphPropertyDefinition* definition :
+           unresolved_property_definitions) {
+        std::unique_ptr<const AnalyzerOutput> analyzer_output;
+        const absl::Status status =
+            AnalyzeExpression(definition->expression_sql(), options, catalog,
+                              catalog->type_factory(), &analyzer_output);
+        if (!status.ok()) {
+          if (first_error.ok()) {
+            first_error = status;
+          }
+          remaining_property_defs.push_back(definition);
+          continue;
+        }
+
+        InternalPropertyGraph::InternalSetResolvedExpr(
+            const_cast<SimpleGraphPropertyDefinition*>(
+                definition->GetAs<SimpleGraphPropertyDefinition>()),
+            analyzer_output->resolved_expr());
+        artifacts.push_back(std::move(analyzer_output));
+        if (definition->GetDeclaration().kind() ==
+            GraphPropertyDeclaration::Kind::kScalar) {
+          GOOGLESQL_RETURN_IF_ERROR(InternalAnalyzerOptions::AddGraphProperty(
+              options, definition->GetDeclaration().Name(),
+              definition->GetDeclaration().Type(),
+              definition->GetDeclaration().kind()));
+        }
+        made_progress = true;
+      }
+
+      if (!made_progress) {
+        GOOGLESQL_RETURN_IF_ERROR(first_error);
+      }
+      unresolved_property_definitions = std::move(remaining_property_defs);
     }
 
     if (element_table->HasDynamicProperties()) {
@@ -655,6 +762,7 @@ absl::Status AddPropertyGraphFromCreatePropertyGraphStmt(
   GOOGLESQL_RET_CHECK(catalog.AddOwnedPropertyGraphIfNotPresent(std::move(graph_name),
                                                       std::move(graph)))
       << absl::StrJoin(resolved_create->name_path(), ".");
+  GOOGLESQL_RETURN_IF_ERROR(catalog.AddPropertyGraphSqlSemantics());
 
   return absl::OkStatus();
 }

@@ -572,7 +572,7 @@ select * from graph_table(
 
 --
 
-ERROR: Property unknown is not defined in PropertyGraph aml [at 3:57]
+ERROR: Property unknown is not exposed by element type GRAPH_NODE(aml)<age UINT32, balance UINT64, birthday DATE, data BYTES, id INT64, name STRING, syndicateData ARRAY<INT64>, syndicateId INT64, syndicateName STRING> [at 3:57]
   match (n IS Person | Account Where PROPERTY_EXISTS(n, unknown))
                                                         ^
 

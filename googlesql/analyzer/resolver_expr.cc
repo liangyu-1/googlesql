@@ -2127,16 +2127,45 @@ absl::Status Resolver::ResolvePathExpressionAsExpression(
   }
 
   if (num_names_consumed == 0 &&
-      expr_resolution_info->is_graph_measure_expression) {
-    // (5) We still haven't found a matching name. See if we can find it in an
-    // graph property (for graph measure expression only).
-    const Type* property_type = googlesql_base::FindPtrOrNull(
-        analyzer_options_.graph_properties(), lowercase_name);
+      expr_resolution_info->allows_graph_property_reference) {
+    // (5) We still haven't found a matching name. See if we can find it in a
+    // graph property.
+    const Type* property_type =
+        InternalAnalyzerOptions::FindGraphPropertyType(analyzer_options_,
+                                                       lowercase_name);
     if (property_type != nullptr) {
+      const GraphPropertyDeclaration::Kind property_kind =
+          InternalAnalyzerOptions::FindGraphPropertyKind(analyzer_options_,
+                                                         lowercase_name);
+      const absl::string_view semantic_name =
+          InternalAnalyzerOptions::FindGraphPropertySemanticName(
+              analyzer_options_, lowercase_name);
+      if (property_kind == GraphPropertyDeclaration::Kind::kMeasure) {
+        if (expr_resolution_info->is_graph_measure_expression) {
+          return MakeSqlErrorAtPoint(path_parse_location.start())
+                 << "Graph measure property "
+                 << ToIdentifierLiteral(semantic_name)
+                 << " cannot be referenced from another graph measure "
+                    "property";
+        }
+        if (expr_resolution_info->clause_name != nullptr &&
+            absl::string_view(expr_resolution_info->clause_name) ==
+                "PROPERTIES clause") {
+          return MakeSqlErrorAtPoint(path_parse_location.start())
+                 << "Graph measure property "
+                 << ToIdentifierLiteral(semantic_name)
+                 << " cannot be referenced from a non-measure graph "
+                    "property definition";
+        }
+        return MakeSqlErrorAtPoint(path_parse_location.start())
+               << "Graph measure property "
+               << ToIdentifierLiteral(semantic_name)
+               << " cannot be referenced from this expression";
+      }
       std::unique_ptr<ResolvedCatalogColumnRef> resolved_catalog_column_ref =
           MakeResolvedCatalogColumnRef(property_type,
                                        /*column=*/nullptr);
-      resolved_catalog_column_ref->set_name(lowercase_name);
+      resolved_catalog_column_ref->set_name(semantic_name);
       resolved_expr = std::move(resolved_catalog_column_ref);
       num_names_consumed = 1;
     }
@@ -2681,19 +2710,10 @@ absl::Status Resolver::ResolvePropertyNameArgument(
       property_name_identifier->GetAsOrDie<ASTPathExpression>()
           ->last_name()
           ->GetAsStringView();
-  const GraphPropertyDeclaration* unused_prop_dcl;
-  const absl::Status status =
-      graph->FindPropertyDeclarationByName(property_name, unused_prop_dcl);
-  if (absl::IsNotFound(status)
-      // Undeclared property allowed for dynamic element type.
-      && !graph_element_type->is_dynamic()) {
-    return MakeSqlErrorAt(property_name_identifier)
-           << "Property " << ToIdentifierLiteral(property_name)
-           << " is not defined in PropertyGraph " << graph->FullName();
-  }
-  if (!status.ok() && !absl::IsNotFound(status)) {
-    return status;
-  }
+  GOOGLESQL_RETURN_IF_ERROR(FindExposedGraphPropertyDeclaration(
+      property_name_identifier, graph, graph_element_type, property_name,
+      /*allows_undeclared_dynamic_properties=*/true)
+                                .status());
   // Make this string literal without AST location so it won't be used as
   // candidate for literal replacement.
   resolved_arguments_out.push_back(MakeResolvedLiteralWithoutLocation(

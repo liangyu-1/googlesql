@@ -44,6 +44,7 @@ class GraphElementLabel;
 class GraphPropertyDeclaration;
 class GraphDynamicLabel;
 class GraphDynamicProperties;
+struct PropertyGraphRelationMetadata;
 
 ABSL_DEPRECATED(
     "Do not use this function. It exists only as a bridge until all callers of "
@@ -274,6 +275,10 @@ class GraphEdgeTable : public GraphElementTable {
 
   // Returns the destination GraphNodeTableReference.
   virtual const GraphNodeTableReference* GetDestNodeTable() const = 0;
+
+  virtual const PropertyGraphRelationMetadata* GetRelationMetadata() const {
+    return nullptr;
+  }
 };
 
 // Represents a label in a property graph.
@@ -421,6 +426,8 @@ class GraphPropertyDefinition {
   // instead of regular ResolvedColumnRef.
   virtual absl::StatusOr<const ResolvedExpr*> GetValueExpression() const = 0;
 
+  virtual const struct GraphPropertySemanticMetadata& SemanticMetadata() const;
+
   // Returns whether or not this GraphPropertyDefinition is a specific
   // interface or implementation.
   template <class GraphPropertyDefinitionSubclass>
@@ -485,6 +492,147 @@ class GraphDynamicProperties {
     return static_cast<const GraphDynamicPropertiesSubclass*>(this);
   }
 };
+
+enum class PropertyGraphNavigationKind {
+  kSource,
+  kDestination,
+  kOutgoing,
+  kIncoming,
+};
+
+struct PropertyGraphNavigationBinding {
+  const GraphElementTable* element_table = nullptr;
+  const GraphEdgeTable* edge_table = nullptr;
+  const GraphElementTable* target_element_table = nullptr;
+  PropertyGraphNavigationKind navigation_kind =
+      PropertyGraphNavigationKind::kOutgoing;
+  std::string navigation_name;
+  bool is_multi = false;
+};
+
+struct GraphPropertySemanticMetadata {
+  std::string description;
+  std::string display_name;
+  std::string semantic_role;
+  std::vector<std::string> semantic_aliases;
+  bool hidden = false;
+};
+
+inline const GraphPropertySemanticMetadata&
+GraphPropertyDefinition::SemanticMetadata() const {
+  static const auto* const kEmptyMetadata = new GraphPropertySemanticMetadata();
+  return *kEmptyMetadata;
+}
+
+struct PropertyGraphMaterializationCandidate {
+  const GraphElementTable* element_table = nullptr;
+  std::vector<int> key_columns;
+  std::vector<const GraphPropertyDeclaration*> measure_properties;
+  bool has_dynamic_label = false;
+  bool has_dynamic_properties = false;
+};
+
+struct PropertyGraphPlannerHooks {
+  const PropertyGraph* graph = nullptr;
+  std::vector<PropertyGraphMaterializationCandidate>
+      materialization_candidates;
+  std::vector<PropertyGraphNavigationBinding> navigation_bindings;
+};
+
+struct WritablePropertyGraphViewDefinition {
+  const PropertyGraph* graph = nullptr;
+  std::vector<const GraphNodeTable*> node_tables;
+  std::vector<const GraphEdgeTable*> edge_tables;
+  bool supports_node_updates = true;
+  bool supports_edge_updates = true;
+  bool supports_property_updates = true;
+  bool supports_relation_updates = true;
+};
+
+struct PropertyGraphRoutineBindingPoint {
+  const GraphNodeTable* node_table = nullptr;
+  std::vector<const GraphElementLabel*> labels;
+  std::vector<const GraphPropertyDeclaration*> property_declarations;
+};
+
+struct PropertyGraphRoutineBindings {
+  const PropertyGraph* graph = nullptr;
+  std::vector<PropertyGraphRoutineBindingPoint> udf_binding_points;
+  std::vector<PropertyGraphRoutineBindingPoint> procedure_binding_points;
+};
+
+struct PropertyGraphMatchSemanticModel {
+  const PropertyGraph* graph = nullptr;
+  std::vector<const GraphNodeTable*> node_tables;
+  std::vector<const GraphEdgeTable*> edge_tables;
+  std::vector<const GraphElementLabel*> labels;
+  std::vector<const GraphPropertyDeclaration*> property_declarations;
+  std::vector<PropertyGraphNavigationBinding> navigation_bindings;
+};
+
+// Helper accessors that preserve semantic declaration order when the concrete
+// graph implementation tracks it, while keeping a deterministic fallback for
+// generic PropertyGraph implementations.
+std::vector<const GraphNodeTable*> GetNodeTablesInDeclarationOrder(
+    const PropertyGraph& graph);
+
+std::vector<const GraphEdgeTable*> GetEdgeTablesInDeclarationOrder(
+    const PropertyGraph& graph);
+
+std::vector<const GraphElementTable*> GetElementTablesInDeclarationOrder(
+    const PropertyGraph& graph,
+    std::optional<GraphElementTable::Kind> kind = std::nullopt);
+
+std::vector<const GraphElementLabel*> GetLabelsInDeclarationOrder(
+    const PropertyGraph& graph);
+
+std::vector<const GraphPropertyDeclaration*>
+GetPropertyDeclarationsInDeclarationOrder(const PropertyGraph& graph);
+
+std::vector<const GraphPropertyDefinition*> GetPropertyDefinitionsInDeclarationOrder(
+    const GraphElementTable& element_table);
+
+std::vector<const GraphElementLabel*> GetLabelsInDeclarationOrder(
+    const GraphElementTable& element_table);
+
+std::vector<const GraphPropertyDeclaration*>
+GetPropertyDeclarationsInDeclarationOrder(
+    const GraphElementTable& element_table);
+
+std::vector<const GraphPropertyDeclaration*>
+GetPropertyDeclarationsInDeclarationOrder(const GraphElementLabel& label);
+
+const GraphNodeTableReference& GetSourceNodeTableReference(
+    const GraphEdgeTable& edge_table);
+
+const GraphNodeTableReference& GetDestinationNodeTableReference(
+    const GraphEdgeTable& edge_table);
+
+std::vector<PropertyGraphNavigationBinding> GetPropertyGraphNavigationBindings(
+    const PropertyGraph& graph,
+    const GraphElementTable& element_table);
+
+std::vector<PropertyGraphNavigationBinding>
+GetPropertyGraphNavigationBindingsForElementTables(
+    const PropertyGraph& graph,
+    absl::Span<const GraphElementTable* const> element_tables);
+
+absl::StatusOr<PropertyGraphNavigationBinding>
+FindPropertyGraphNavigationBinding(const PropertyGraph& graph,
+                                   const GraphElementTable& element_table,
+                                   absl::string_view navigation_name);
+
+PropertyGraphPlannerHooks GetPropertyGraphPlannerHooks(
+    const PropertyGraph& graph);
+
+WritablePropertyGraphViewDefinition GetWritablePropertyGraphViewDefinition(
+    const PropertyGraph& graph);
+
+PropertyGraphRoutineBindings GetPropertyGraphRoutineBindings(
+    const PropertyGraph& graph);
+
+PropertyGraphMatchSemanticModel GetPropertyGraphMatchSemanticModel(
+    const PropertyGraph& graph);
 
 }  // namespace googlesql
 #endif  // GOOGLESQL_PUBLIC_PROPERTY_GRAPH_H_

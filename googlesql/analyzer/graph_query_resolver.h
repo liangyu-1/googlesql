@@ -57,20 +57,26 @@ struct CompareByName {
 using ColumnNameSet =
     absl::flat_hash_set<IdString, IdStringCaseHash, IdStringCaseEqualFunc>;
 
-// Note that PropertySet and ElementTableSet are ordered because of the file
-// based analyzer tests, which performs a text based comparison and thus
-// requires deterministic ResolvedASTs.
-using PropertySet = std::set<const GraphPropertyDeclaration*,
-                             CompareByName<GraphPropertyDeclaration>>;
+// Note that PropertySet and ElementTableSet are ordered because the file-based
+// analyzer tests perform a text comparison and thus require deterministic
+// ResolvedASTs.
+using PropertySet = std::vector<const GraphPropertyDeclaration*>;
 using ElementTableSet =
     std::set<const GraphElementTable*, CompareByName<GraphElementTable>>;
 using DynamicPropertyMap = absl::flat_hash_map<const GraphElementTable*,
                                                const GraphDynamicProperties*>;
+using NavigationBindingSet = std::vector<PropertyGraphNavigationBinding>;
 
-// Returns a set of static properties exposed by <element_tables>.
-absl::Status GetPropertySet(const ElementTableSet& element_tables,
+// Returns the static properties exposed by <element_tables> in graph semantic
+// declaration order.
+absl::Status GetPropertySet(const PropertyGraph& property_graph,
+                            const ElementTableSet& element_tables,
                             PropertySet& static_properties,
                             DynamicPropertyMap& dynamic_properties);
+
+absl::Status GetNavigationBindingSet(const PropertyGraph& property_graph,
+                                     const ElementTableSet& element_tables,
+                                     NavigationBindingSet& navigation_bindings);
 
 // Returns a set of tables satisfying <label_expr> and which have
 // the specified element_kind (node or edge).
@@ -84,7 +90,7 @@ template <typename T>
 absl::StatusOr<ElementTableSet> GetTablesSatisfyingLabelExpr(
     const PropertyGraph& property_graph,
     const ResolvedGraphLabelExpr* label_expr,
-    const absl::flat_hash_set<const T*>& tables);
+    absl::Span<const T* const> tables);
 
 class Resolver;
 class AnalyzerOptions;

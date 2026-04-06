@@ -8612,6 +8612,22 @@ absl::Status Validator::ValidateResolvedCreatePropertyGraphStmt(
         edge_table.get(), node_table_scan_map, label_name_set,
         property_dcl_name_map));
   }
+  for (const std::unique_ptr<const ResolvedGraphRelationshipDeclaration>&
+           relation_dcl : stmt->relation_declaration_list()) {
+    VALIDATOR_RET_CHECK(!relation_dcl->edge_table_alias().empty());
+    VALIDATOR_RET_CHECK(!relation_dcl->source_node_identifier().empty());
+    VALIDATOR_RET_CHECK(!relation_dcl->destination_node_identifier().empty());
+    VALIDATOR_RET_CHECK(!relation_dcl->source_name().empty());
+    VALIDATOR_RET_CHECK(!relation_dcl->destination_name().empty());
+    VALIDATOR_RET_CHECK(!relation_dcl->outgoing_name().empty());
+    VALIDATOR_RET_CHECK(!relation_dcl->incoming_name().empty());
+    VALIDATOR_RET_CHECK(
+        element_table_name_set.contains(relation_dcl->edge_table_alias()));
+    VALIDATOR_RET_CHECK(
+        element_table_name_set.contains(relation_dcl->source_node_identifier()));
+    VALIDATOR_RET_CHECK(element_table_name_set.contains(
+        relation_dcl->destination_node_identifier()));
+  }
   return absl::OkStatus();
 }
 
