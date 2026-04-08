@@ -32,6 +32,7 @@
 #include "googlesql/public/function_signature.h"
 #include "googlesql/public/options.pb.h"
 #include "googlesql/public/simple_catalog.h"
+#include "googlesql/public/simple_property_graph.h"
 #include "googlesql/proto/simple_catalog.pb.h"
 #include "googlesql/public/table_valued_function.h"
 #include "googlesql/public/types/type.h"
@@ -517,6 +518,7 @@ TEST(SimpleCatalogUtilTest, AddPropertyGraphAddsSqlNavigationColumns) {
       "total_id"));
   ASSERT_NE(total_id, nullptr);
   ASSERT_TRUE(total_id->HasMeasureExpression());
+  EXPECT_FALSE(total_id->HasGeneratedExpression());
   EXPECT_EQ(total_id->GetExpression()->GetExpressionString(), "SUM(id)");
   EXPECT_THAT(total_id->GetExpression()->RowIdentityColumns(),
               testing::Optional(std::vector<int>{0}));
@@ -586,6 +588,26 @@ TEST(SimpleCatalogUtilTest, AddPropertyGraphAddsSqlNavigationColumns) {
             upper_name);
   EXPECT_EQ(person_sql_columns_via_catalog.property_columns[1].second,
             total_id);
+
+  ASSERT_FALSE(artifacts.empty());
+  ASSERT_TRUE(
+      artifacts.back()->resolved_statement()->Is<ResolvedCreatePropertyGraphStmt>());
+  const auto* create_graph_stmt =
+      artifacts.back()->resolved_statement()->GetAs<ResolvedCreatePropertyGraphStmt>();
+  bool saw_upper_name_decl = false;
+  bool saw_total_id_decl = false;
+  for (const auto& property_decl : create_graph_stmt->property_declaration_list()) {
+    if (property_decl->name() == "upper_name") {
+      saw_upper_name_decl = true;
+      EXPECT_FALSE(property_decl->is_measure());
+    }
+    if (property_decl->name() == "total_id") {
+      saw_total_id_decl = true;
+      EXPECT_TRUE(property_decl->is_measure());
+    }
+  }
+  EXPECT_TRUE(saw_upper_name_decl);
+  EXPECT_TRUE(saw_total_id_decl);
 
   const Column* destination_via_graph = nullptr;
   GOOGLESQL_ASSERT_OK(catalog.FindPropertyGraphSqlColumn(
@@ -719,7 +741,6 @@ TEST(SimpleCatalogUtilTest, AddPropertyGraphAddsSqlNavigationColumns) {
       "SELECT AGGREGATE(p.fin_graph_property_total_id) FROM person AS p",
       analyzer_options, &catalog, catalog.type_factory(), &analyzer_output));
 
-  ASSERT_FALSE(artifacts.empty());
   SQLBuilder sql_builder;
   GOOGLESQL_ASSERT_OK(
       sql_builder.Process(*artifacts.back()->resolved_statement()));
@@ -806,6 +827,174 @@ TEST(SimpleCatalogUtilTest, AddPropertyGraphAddsSqlNavigationColumns) {
       "SELECT AGGREGATE(p.fin_graph_property_total_id) FROM person AS p",
       analyzer_options, restored_catalog.get(), restored_catalog->type_factory(),
       &analyzer_output));
+}
+
+TEST(SimpleCatalogUtilTest,
+     AddPropertyGraphNavigationColumnsKeepTableNameLookupContract) {
+  SimpleCatalog catalog("simple");
+  catalog.AddOwnedTable(std::make_unique<SimpleTable>(
+      "person", std::vector<SimpleTable::NameAndType>{{"id", types::Int64Type()}}));
+  catalog.AddOwnedTable(std::make_unique<SimpleTable>(
+      "account", std::vector<SimpleTable::NameAndType>{{"id", types::Int64Type()}}));
+  catalog.AddOwnedTable(std::make_unique<SimpleTable>(
+      "ownership", std::vector<SimpleTable::NameAndType>{
+                       {"person_id", types::Int64Type()},
+                       {"account_id", types::Int64Type()}}));
+
+  AnalyzerOptions analyzer_options;
+  analyzer_options.mutable_language()->EnableLanguageFeature(FEATURE_SQL_GRAPH);
+  analyzer_options.mutable_language()->AddSupportedStatementKind(
+      RESOLVED_CREATE_PROPERTY_GRAPH_STMT);
+  std::vector<std::unique_ptr<const AnalyzerOutput>> artifacts;
+
+  GOOGLESQL_ASSERT_OK(AddPropertyGraphFromCreatePropertyGraphStmt(R"sql(
+      CREATE PROPERTY GRAPH nav_graph
+      NODE TABLES (
+        person KEY(id),
+        account KEY(id)
+      )
+      EDGE TABLES (
+        ownership
+          OPTIONS(
+            destination_name = "account_owner_target",
+            outgoing_name = "ownerships",
+            incoming_name = "owned_by"
+          )
+          SOURCE KEY(person_id) REFERENCES person(id)
+          DESTINATION KEY(account_id) REFERENCES account(id)
+      )
+      )sql",
+      analyzer_options, artifacts, catalog));
+
+  const PropertyGraph* graph = nullptr;
+  GOOGLESQL_ASSERT_OK(catalog.FindPropertyGraph({"nav_graph"}, &graph));
+  ASSERT_NE(graph, nullptr);
+  auto edges = googlesql::GetEdgeTablesInDeclarationOrder(*graph);
+  ASSERT_EQ(edges.size(), 1);
+
+  const Column* source_column = nullptr;
+  GOOGLESQL_ASSERT_OK(googlesql::FindPropertyGraphSourceColumn(
+      *graph, *edges[0], &source_column));
+  ASSERT_NE(source_column, nullptr);
+  EXPECT_EQ(source_column->Name(), "nav_graph_source_person");
+
+  const Column* destination_column = nullptr;
+  GOOGLESQL_ASSERT_OK(googlesql::FindPropertyGraphDestinationColumn(
+      *graph, *edges[0], &destination_column));
+  ASSERT_NE(destination_column, nullptr);
+  EXPECT_EQ(destination_column->Name(), "nav_graph_destination_account");
+
+  const Column* outgoing_column = nullptr;
+  GOOGLESQL_ASSERT_OK(googlesql::FindPropertyGraphOutgoingColumn(
+      *graph, *edges[0], &outgoing_column));
+  ASSERT_NE(outgoing_column, nullptr);
+  EXPECT_EQ(outgoing_column->Name(), "nav_graph_outgoing_ownership");
+
+  const Column* incoming_column = nullptr;
+  GOOGLESQL_ASSERT_OK(googlesql::FindPropertyGraphIncomingColumn(
+      *graph, *edges[0], &incoming_column));
+  ASSERT_NE(incoming_column, nullptr);
+  EXPECT_EQ(incoming_column->Name(), "nav_graph_incoming_ownership");
+
+  const Table* ownership_table = nullptr;
+  GOOGLESQL_ASSERT_OK(catalog.FindTable({"ownership"}, &ownership_table));
+  ASSERT_NE(ownership_table, nullptr);
+  const Column* wrong_destination_name = nullptr;
+  EXPECT_THAT(
+      catalog.FindPropertyGraphSqlColumn(
+          *ownership_table, "nav_graph",
+          SimpleCatalog::PropertyGraphSqlColumnKind::kDestination,
+          &wrong_destination_name, "account_owner_target"),
+      StatusIs(absl::StatusCode::kNotFound));
+
+  std::unique_ptr<const AnalyzerOutput> analyzer_output;
+  GOOGLESQL_EXPECT_OK(AnalyzeStatement(
+      "SELECT e.nav_graph_destination_account.id FROM ownership AS e",
+      analyzer_options, &catalog, catalog.type_factory(), &analyzer_output));
+  GOOGLESQL_EXPECT_OK(AnalyzeStatement(
+      "SELECT p.nav_graph_outgoing_ownership FROM person AS p",
+      analyzer_options, &catalog, catalog.type_factory(), &analyzer_output));
+}
+
+TEST(SimpleCatalogUtilTest,
+     SimplePropertyGraphDuplicateAddsDoNotCorruptDeclarationOrderVectors) {
+  SimpleCatalog catalog("simple");
+  catalog.AddOwnedTable(std::make_unique<SimpleTable>(
+      "node_table", std::vector<SimpleTable::NameAndType>{{"id", types::Int64Type()}}));
+  catalog.AddOwnedTable(std::make_unique<SimpleTable>(
+      "edge_table", std::vector<SimpleTable::NameAndType>{
+                        {"src_id", types::Int64Type()},
+                        {"dst_id", types::Int64Type()}}));
+
+  const Table* node_input = nullptr;
+  const Table* edge_input = nullptr;
+  GOOGLESQL_ASSERT_OK(catalog.FindTable({"node_table"}, &node_input));
+  GOOGLESQL_ASSERT_OK(catalog.FindTable({"edge_table"}, &edge_input));
+  ASSERT_NE(node_input, nullptr);
+  ASSERT_NE(edge_input, nullptr);
+
+  std::vector<std::string> graph_name_path = {"dup_graph"};
+  SimplePropertyGraph graph(/*name_path=*/graph_name_path,
+                            /*node_tables=*/{},
+                            /*edge_tables=*/{},
+                            /*labels=*/{},
+                            /*property_declarations=*/{});
+
+  graph.AddPropertyDeclaration(std::make_unique<SimpleGraphPropertyDeclaration>(
+      "prop", graph_name_path, types::Int64Type()));
+  graph.AddPropertyDeclaration(std::make_unique<SimpleGraphPropertyDeclaration>(
+      "PROP", graph_name_path, types::Int64Type()));
+  EXPECT_EQ(graph.GetPropertyDeclarationsInDeclarationOrder().size(), 1);
+
+  graph.AddLabel(std::make_unique<SimpleGraphElementLabel>(
+      "label", graph_name_path,
+      absl::Span<const GraphPropertyDeclaration* const>{}));
+  graph.AddLabel(std::make_unique<SimpleGraphElementLabel>(
+      "LABEL", graph_name_path,
+      absl::Span<const GraphPropertyDeclaration* const>{}));
+  EXPECT_EQ(graph.GetLabelsInDeclarationOrder().size(), 1);
+
+  graph.AddNodeTable(std::make_unique<SimpleGraphNodeTable>(
+      "Node", graph_name_path, node_input, std::vector<int>{0},
+      absl::Span<const GraphElementLabel* const>{},
+      std::vector<std::unique_ptr<const GraphPropertyDefinition>>{}));
+  graph.AddNodeTable(std::make_unique<SimpleGraphNodeTable>(
+      "node", graph_name_path, node_input, std::vector<int>{0},
+      absl::Span<const GraphElementLabel* const>{},
+      std::vector<std::unique_ptr<const GraphPropertyDefinition>>{}));
+  auto node_tables = graph.GetNodeTablesInDeclarationOrder();
+  ASSERT_EQ(node_tables.size(), 1);
+  EXPECT_EQ(node_tables[0]->Name(), "Node");
+
+  graph.AddEdgeTable(std::make_unique<SimpleGraphEdgeTable>(
+      "Rel", graph_name_path, edge_input, std::vector<int>{0, 1},
+      absl::Span<const GraphElementLabel* const>{},
+      std::vector<std::unique_ptr<const GraphPropertyDefinition>>{},
+      std::make_unique<SimpleGraphNodeTableReference>(node_tables[0],
+                                                      std::vector<int>{0},
+                                                      std::vector<int>{0}),
+      std::make_unique<SimpleGraphNodeTableReference>(node_tables[0],
+                                                      std::vector<int>{1},
+                                                      std::vector<int>{0})));
+  graph.AddEdgeTable(std::make_unique<SimpleGraphEdgeTable>(
+      "rel", graph_name_path, edge_input, std::vector<int>{0, 1},
+      absl::Span<const GraphElementLabel* const>{},
+      std::vector<std::unique_ptr<const GraphPropertyDefinition>>{},
+      std::make_unique<SimpleGraphNodeTableReference>(node_tables[0],
+                                                      std::vector<int>{0},
+                                                      std::vector<int>{0}),
+      std::make_unique<SimpleGraphNodeTableReference>(node_tables[0],
+                                                      std::vector<int>{1},
+                                                      std::vector<int>{0})));
+  auto edge_tables = graph.GetEdgeTablesInDeclarationOrder();
+  ASSERT_EQ(edge_tables.size(), 1);
+  EXPECT_EQ(edge_tables[0]->Name(), "Rel");
+
+  std::vector<const GraphElementTable*> ordered_element_tables =
+      googlesql::GetElementTablesInDeclarationOrder(graph);
+  ASSERT_EQ(ordered_element_tables.size(), 2);
+  EXPECT_EQ(ordered_element_tables[0]->Name(), "Node");
+  EXPECT_EQ(ordered_element_tables[1]->Name(), "Rel");
 }
 
 TEST(SimpleCatalogUtilTest, AddPropertyGraphAllowsDerivedPropertyChaining) {

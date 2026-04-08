@@ -260,44 +260,45 @@ struct RelationDeclarationOptions {
 };
 
 absl::StatusOr<RelationDeclarationOptions> ResolveRelationDeclarationOptions(
-    Resolver& resolver, const ASTOptionsList* options_list) {
+    const ASTOptionsList* options_list) {
   RelationDeclarationOptions options;
   if (options_list == nullptr) {
     return options;
   }
-  std::vector<std::unique_ptr<const ResolvedOption>> resolved_options;
-  GOOGLESQL_RETURN_IF_ERROR(resolver.ResolveOptionsList(
-      options_list, /*allow_alter_array_operators=*/false, &resolved_options));
-  for (const std::unique_ptr<const ResolvedOption>& option : resolved_options) {
-    if (option->value() == nullptr || !option->value()->Is<ResolvedLiteral>()) {
+  for (const ASTOptionsEntry* option : options_list->options_entries()) {
+    if (option == nullptr || option->name() == nullptr || option->value() == nullptr) {
       continue;
     }
-    const Value& value = option->value()->GetAs<ResolvedLiteral>()->value();
-    if (googlesql_base::CaseEqual(option->name(), "source_name") &&
-        value.type()->IsString()) {
-      options.source_name = value.string_value();
-    } else if (googlesql_base::CaseEqual(option->name(), "destination_name") &&
-               value.type()->IsString()) {
-      options.destination_name = value.string_value();
-    } else if (googlesql_base::CaseEqual(option->name(), "outgoing_name") &&
-               value.type()->IsString()) {
-      options.outgoing_name = value.string_value();
-    } else if (googlesql_base::CaseEqual(option->name(), "incoming_name") &&
-               value.type()->IsString()) {
-      options.incoming_name = value.string_value();
-    } else if (googlesql_base::CaseEqual(option->name(), "source_is_multi") &&
-               value.type()->IsBool()) {
-      options.source_is_multi = value.bool_value();
-    } else if (googlesql_base::CaseEqual(option->name(),
-                                         "destination_is_multi") &&
-               value.type()->IsBool()) {
-      options.destination_is_multi = value.bool_value();
-    } else if (googlesql_base::CaseEqual(option->name(), "outgoing_is_multi") &&
-               value.type()->IsBool()) {
-      options.outgoing_is_multi = value.bool_value();
-    } else if (googlesql_base::CaseEqual(option->name(), "incoming_is_multi") &&
-               value.type()->IsBool()) {
-      options.incoming_is_multi = value.bool_value();
+    const absl::string_view option_name = option->name()->GetAsStringView();
+    if (const ASTStringLiteral* string_literal =
+            option->value()->GetAsOrNull<ASTStringLiteral>();
+        string_literal != nullptr) {
+      const std::string& value = string_literal->string_value();
+      if (googlesql_base::CaseEqual(option_name, "source_name")) {
+        options.source_name = value;
+      } else if (googlesql_base::CaseEqual(option_name, "destination_name")) {
+        options.destination_name = value;
+      } else if (googlesql_base::CaseEqual(option_name, "outgoing_name")) {
+        options.outgoing_name = value;
+      } else if (googlesql_base::CaseEqual(option_name, "incoming_name")) {
+        options.incoming_name = value;
+      }
+      continue;
+    }
+    if (const ASTBooleanLiteral* bool_literal =
+            option->value()->GetAsOrNull<ASTBooleanLiteral>();
+        bool_literal != nullptr) {
+      const bool value = bool_literal->value();
+      if (googlesql_base::CaseEqual(option_name, "source_is_multi")) {
+        options.source_is_multi = value;
+      } else if (googlesql_base::CaseEqual(option_name,
+                                           "destination_is_multi")) {
+        options.destination_is_multi = value;
+      } else if (googlesql_base::CaseEqual(option_name, "outgoing_is_multi")) {
+        options.outgoing_is_multi = value;
+      } else if (googlesql_base::CaseEqual(option_name, "incoming_is_multi")) {
+        options.incoming_is_multi = value;
+      }
     }
   }
   return options;
@@ -1498,7 +1499,7 @@ absl::Status GraphStmtResolver::ResolveCreatePropertyGraphStmt(
       GOOGLESQL_ASSIGN_OR_RETURN(
           RelationDeclarationOptions relation_options,
           ResolveRelationDeclarationOptions(
-              resolver_, ast_edge_table->default_label_options_list()));
+              ast_edge_table->default_label_options_list()));
       GOOGLESQL_RETURN_IF_ERROR(ValidateLabelWithOptionsNotBoundInMultipleElementTables(
           element_table_with_labels_and_properties.labels,
           labels_with_options));

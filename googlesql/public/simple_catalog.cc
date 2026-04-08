@@ -77,14 +77,6 @@ namespace googlesql {
 
 namespace {
 
-std::string MaybePluralize(absl::string_view name) {
-  std::string result(name);
-  if (!absl::EndsWithIgnoreCase(result, "s")) {
-    result.append("s");
-  }
-  return result;
-}
-
 absl::StatusOr<std::vector<const Column*>> LookupColumnsByIndex(
     const Table& table, absl::Span<const int> column_indexes) {
   std::vector<const Column*> columns;
@@ -327,32 +319,30 @@ absl::Status AddSqlNavigationColumnsForEdgeTable(
       const_cast<SimpleTable*>(source_node->GetTable()->GetAs<SimpleTable>());
   SimpleTable* dest_simple =
       const_cast<SimpleTable*>(dest_node->GetTable()->GetAs<SimpleTable>());
-  const PropertyGraphRelationMetadata relation_metadata =
-      googlesql::GetPropertyGraphRelationMetadata(edge_table);
 
   GOOGLESQL_ASSIGN_OR_RETURN(
       std::vector<const Column*> source_edge_columns,
       LookupColumnsByIndex(*edge_table.GetTable(),
-                           source_ref->GetEdgeTableColumns()));
+                           source_ref.GetEdgeTableColumns()));
   GOOGLESQL_ASSIGN_OR_RETURN(
       std::vector<const Column*> source_node_columns,
       LookupColumnsByIndex(*source_node->GetTable(),
-                           source_ref->GetNodeTableColumns()));
+                           source_ref.GetNodeTableColumns()));
   GOOGLESQL_ASSIGN_OR_RETURN(
       std::vector<const Column*> dest_edge_columns,
       LookupColumnsByIndex(*edge_table.GetTable(),
-                           dest_ref->GetEdgeTableColumns()));
+                           dest_ref.GetEdgeTableColumns()));
   GOOGLESQL_ASSIGN_OR_RETURN(
       std::vector<const Column*> dest_node_columns,
       LookupColumnsByIndex(*dest_node->GetTable(),
-                           dest_ref->GetNodeTableColumns()));
+                           dest_ref.GetNodeTableColumns()));
 
   GOOGLESQL_RETURN_IF_ERROR(AddSqlJoinColumn(
       catalog, *edge_simple,
       GetPropertyGraphSqlColumnName(
           graph.Name(), SimpleCatalog::PropertyGraphSqlColumnKind::kSource,
-          relation_metadata.source_exposure_name),
-      *source_node->GetTable(), relation_metadata.source_is_multi,
+          source_node->Name()),
+      *source_node->GetTable(), /*is_multi=*/false,
       source_edge_columns,
       source_node_columns));
   GOOGLESQL_RETURN_IF_ERROR(AddSqlJoinColumn(
@@ -360,24 +350,24 @@ absl::Status AddSqlNavigationColumnsForEdgeTable(
       GetPropertyGraphSqlColumnName(
           graph.Name(),
           SimpleCatalog::PropertyGraphSqlColumnKind::kDestination,
-          relation_metadata.destination_exposure_name),
-      *dest_node->GetTable(), relation_metadata.destination_is_multi,
+          dest_node->Name()),
+      *dest_node->GetTable(), /*is_multi=*/false,
       dest_edge_columns,
       dest_node_columns));
   GOOGLESQL_RETURN_IF_ERROR(AddSqlJoinColumn(
       catalog, *source_simple,
       GetPropertyGraphSqlColumnName(
           graph.Name(), SimpleCatalog::PropertyGraphSqlColumnKind::kOutgoing,
-          MaybePluralize(relation_metadata.outgoing_exposure_name)),
-      *edge_table.GetTable(), relation_metadata.outgoing_is_multi,
+          edge_table.Name()),
+      *edge_table.GetTable(), /*is_multi=*/true,
       source_node_columns,
       source_edge_columns));
   GOOGLESQL_RETURN_IF_ERROR(AddSqlJoinColumn(
       catalog, *dest_simple,
       GetPropertyGraphSqlColumnName(
           graph.Name(), SimpleCatalog::PropertyGraphSqlColumnKind::kIncoming,
-          MaybePluralize(relation_metadata.incoming_exposure_name)),
-      *edge_table.GetTable(), relation_metadata.incoming_is_multi,
+          edge_table.Name()),
+      *edge_table.GetTable(), /*is_multi=*/true,
       dest_node_columns,
       dest_edge_columns));
   return absl::OkStatus();

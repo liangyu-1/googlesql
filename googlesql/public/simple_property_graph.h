@@ -106,32 +106,43 @@ class SimplePropertyGraph : public PropertyGraph {
 
   // Add a node table.
   void AddNodeTable(std::unique_ptr<const GraphNodeTable> node_table) {
-    node_tables_in_order_.push_back(node_table.get());
-    node_tables_map_.try_emplace(absl::AsciiStrToLower(node_table->Name()),
-                                 std::move(node_table));
+    auto [it, inserted] =
+        node_tables_map_.try_emplace(absl::AsciiStrToLower(node_table->Name()),
+                                     std::move(node_table));
+    if (inserted) {
+      node_tables_in_order_.push_back(it->second.get());
+    }
   }
 
   // Add an edge table.
   void AddEdgeTable(std::unique_ptr<const GraphEdgeTable> edge_table) {
-    edge_tables_in_order_.push_back(edge_table.get());
-    edge_tables_map_.try_emplace(absl::AsciiStrToLower(edge_table->Name()),
-                                 std::move(edge_table));
+    auto [it, inserted] =
+        edge_tables_map_.try_emplace(absl::AsciiStrToLower(edge_table->Name()),
+                                     std::move(edge_table));
+    if (inserted) {
+      edge_tables_in_order_.push_back(it->second.get());
+    }
   }
 
   // Add a label.
   void AddLabel(std::unique_ptr<const GraphElementLabel> label) {
-    labels_in_order_.push_back(label.get());
-    labels_map_.try_emplace(absl::AsciiStrToLower(label->Name()),
-                            std::move(label));
+    auto [it, inserted] =
+        labels_map_.try_emplace(absl::AsciiStrToLower(label->Name()),
+                                std::move(label));
+    if (inserted) {
+      labels_in_order_.push_back(it->second.get());
+    }
   }
 
   // Add a label.
   void AddPropertyDeclaration(
       std::unique_ptr<const GraphPropertyDeclaration> property_declaration) {
-    property_dcls_in_order_.push_back(property_declaration.get());
-    property_dcls_map_.try_emplace(
+    auto [it, inserted] = property_dcls_map_.try_emplace(
         absl::AsciiStrToLower(property_declaration->Name()),
         std::move(property_declaration));
+    if (inserted) {
+      property_dcls_in_order_.push_back(it->second.get());
+    }
   }
 
   absl::Status Serialize(FileDescriptorSetMap* file_descriptor_set_map,
