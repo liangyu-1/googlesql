@@ -123,7 +123,9 @@ int64_t GetRawHashSetExternallyAllocatedMemoryEstimate(
   // Control state is kept for each slot. Last table is spit into groups of 16
   // control bytes, table is padded with group size + 1 byte.
   constexpr int control_state_padding = 17;
-  return GetArrayAllocationMemoryEstimate<typename SetT::slot_type>(capacity) +
+  // Newer Abseil versions hide raw_hash_set::slot_type. For this estimate we
+  // only need a stable public approximation of the slot payload size.
+  return GetArrayAllocationMemoryEstimate<typename SetT::value_type>(capacity) +
          GetArrayAllocationMemoryEstimate<uint8_t>(capacity +
                                                    control_state_padding);
 }

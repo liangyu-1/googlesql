@@ -897,13 +897,8 @@ absl::partial_ordering JsonCompareNumber(double x, Int y) {
   return reversed_result;
 }
 
-// TODO: Remove this method and directly use <=> once on C++20.
 template <typename Type>
 absl::partial_ordering spaceship_operator(const Type& x, const Type& y) {
-#if defined(__cpp_impl_three_way_comparison) && \
-    __cpp_impl_three_way_comparison >= 201907L
-  return x <=> y;
-#else
   if (x < y) {
     return absl::partial_ordering::less;
   } else if (x > y) {
@@ -911,7 +906,6 @@ absl::partial_ordering spaceship_operator(const Type& x, const Type& y) {
   } else {
     return absl::partial_ordering::equivalent;
   }
-#endif
 }
 
 absl::partial_ordering CompareNlohmannJSON(const JSON& lhs, const JSON& rhs) {

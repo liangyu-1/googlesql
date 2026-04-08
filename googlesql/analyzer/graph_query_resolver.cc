@@ -978,12 +978,14 @@ absl::StatusOr<ElementTableSet> GetMatchingElementTables(
   // labels satisfies the given label expression.
   switch (element_kind) {
     case GraphElementTable::Kind::kNode: {
-      return GetTablesSatisfyingLabelExpr(property_graph, label_expr,
-                                          semantic_model.node_tables);
+      return GetTablesSatisfyingLabelExpr(
+          property_graph, label_expr,
+          absl::MakeConstSpan(semantic_model.node_tables));
     }
     case GraphElementTable::Kind::kEdge: {
-      return GetTablesSatisfyingLabelExpr(property_graph, label_expr,
-                                          semantic_model.edge_tables);
+      return GetTablesSatisfyingLabelExpr(
+          property_graph, label_expr,
+          absl::MakeConstSpan(semantic_model.edge_tables));
     }
   }
 }

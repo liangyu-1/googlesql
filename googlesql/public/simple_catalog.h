@@ -29,6 +29,7 @@
 #include "googlesql/public/builtin_function.h"
 #include "googlesql/public/builtin_function_options.h"
 #include "googlesql/public/catalog.h"
+#include "googlesql/public/catalog_helper.h"
 #include "googlesql/public/constant.h"
 #include "googlesql/public/evaluator_table_iterator.h"
 #include "googlesql/public/function.h"

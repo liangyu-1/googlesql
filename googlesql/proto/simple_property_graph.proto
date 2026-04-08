@@ -20,7 +20,7 @@ package googlesql;
 
 import "googlesql/public/annotation.proto";
 import "googlesql/public/type.proto";
-import "googlesql/resolved_ast/serialization.proto";
+import "googlesql/resolved_ast/resolved_ast.proto";
 
 option java_package = "com.google.googlesql";
 option java_outer_classname = "SimplePropertyGraphProtos";

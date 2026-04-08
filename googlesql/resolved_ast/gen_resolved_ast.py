@@ -11393,7 +11393,7 @@ ResolvedArgumentRef(y)
 
   gen.AddNode(
       name='ResolvedGraphRelationshipDeclaration',
-      tag_id=292,
+      tag_id=309,
       parent='ResolvedArgument',
       comment="""
        Explicit semantic relation metadata for a graph edge exposure.
